@@ -19,6 +19,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
+	"layeh.com/gopus"
 )
 
 // Global variables
@@ -909,6 +910,16 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		return
 	}
 	
+	// Initialize Opus encoder
+	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
+	if err != nil {
+		log.Printf("playAudioStream: Error creating Opus encoder: %v", err)
+		return
+	}
+	
+	// Set bit rate
+	enc.SetBitrate(128 * 1000) // 128kbps
+	
 	// Send audio to Discord
 	if vc != nil {
 		vc.Speaking(true)
@@ -932,7 +943,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	}()
 	
 	// Buffer for audio frames - exact size for stereo 16-bit PCM
-	audioBuf := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
+	pcmBuf := make([]int16, 960*2) // 960 samples * 2 channels
 	
 	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -948,7 +959,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		
 		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
-		n, err := io.ReadFull(reader, audioBuf)
+		audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
+		n, err := io.ReadFull(reader, audioBytes)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				log.Println("playAudioStream: End of audio stream reached")
@@ -964,13 +976,29 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		
 		if n > 0 && vc != nil && vc.OpusSend != nil {
+			// Convert bytes to int16 samples
+			for i := 0; i < n/2; i++ {
+				// Correctly convert little-endian bytes to int16
+				pcmBuf[i] = int16(audioBytes[i*2]) | int16(audioBytes[i*2+1])<<8
+			}
+			
+			// Encode to Opus
+			opusData, err := enc.Encode(pcmBuf[:n/2], 960, 4000) // 960 samples per channel, max 4000 bytes
+			if err != nil {
+				log.Printf("playAudioStream: Error encoding to Opus: %v", err)
+				continue
+			}
+			
+			// Check the size of the encoded data
+			log.Printf("Encoded Opus data size: %d bytes", len(opusData))
+			
 			// Wait for the next tick to maintain proper timing
 			<-ticker.C
 			
-			// Send the audio frame to Discord
+			// Send the encoded Opus frame to Discord
 			select {
-			case vc.OpusSend <- audioBuf[:n]:
-				log.Printf("Sent %d bytes to Discord as PCM", n)
+			case vc.OpusSend <- opusData:
+				log.Printf("Sent %d bytes to Discord as Opus", len(opusData))
 				frameCounter++
 			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
 				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
