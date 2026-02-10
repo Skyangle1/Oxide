@@ -4,7 +4,7 @@
 FROM golang:1.21-alpine AS builder
 
 # Install dependencies needed for building
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git ca-certificates gcc musl-dev opus-dev pkgconfig
 
 # Set working directory
 WORKDIR /app
@@ -19,7 +19,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o oxide-music-bot .
+RUN CGO_ENABLED=1 GOOS=linux go build -o oxide-music-bot .
 
 # Runtime stage
 FROM alpine:latest
@@ -30,7 +30,8 @@ RUN apk --no-cache add \
     ffmpeg \
     python3 \
     curl \
-    wget
+    wget \
+    opus
 
 # Download yt-dlp binary directly to avoid pip issues
 RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/bin/yt-dlp && \
