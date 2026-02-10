@@ -46,7 +46,7 @@ WORKDIR /app
 COPY --from=builder /app/oxide-music-bot .
 
 # Change ownership to the non-root user
-RUN chown -R appuser:appgroup /app
+RUN mkdir -p /app/cache && chown -R appuser:appgroup /app
 
 # Switch to non-root user
 USER appuser
