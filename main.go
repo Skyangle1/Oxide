@@ -835,27 +835,36 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		return
 	}
 	
-	// Create the yt-dlp and ffmpeg pipeline
-	// yt-dlp gets the audio stream, ffmpeg converts it to the format Discord expects
-	cmd := exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", 
-		"-i", "-", "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "quiet", "pipe:1")
-	
-	// Create a pipe to feed yt-dlp output to ffmpeg
-	ytCmd := exec.Command("/usr/bin/yt-dlp", "-f", "bestaudio", "-o", "-", "--no-check-certificate", "--no-warnings", "--extract-audio", "--audio-format", "mp3", "--no-playlist", "--", sanitizedURL)
-	
-	stdout, err := ytCmd.StdoutPipe()
+	// First, get the direct URL using yt-dlp
+	getUrlCmd := exec.Command("/usr/bin/yt-dlp", "--get-url", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--no-playlist", "--", sanitizedURL)
+	urlOutput, err := getUrlCmd.Output()
 	if err != nil {
-		log.Printf("playAudioStream: Error creating stdout pipe: %v", err)
+		log.Printf("playAudioStream: Error getting direct URL from yt-dlp: %v", err)
+		stderr, stderrErr := getUrlCmd.CombinedOutput()
+		if stderrErr != nil {
+			log.Printf("playAudioStream: yt-dlp get-url stderr: %s", string(stderr))
+		}
 		return
 	}
 	
-	cmd.Stdin = stdout
+	directURL := strings.TrimSpace(string(urlOutput))
+	log.Printf("playAudioStream: Got direct URL: %s", directURL)
 	
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("playAudioStream: Error creating stderr pipe: %v", err)
-		return
-	}
+	// Create the ffmpeg command with the direct URL
+	// Using optimized args for Discord audio
+	cmd := exec.Command("ffmpeg", 
+		"-reconnect", "1", 
+		"-reconnect_streamed", "1", 
+		"-reconnect_delay_max", "5",
+		"-i", directURL, 
+		"-f", "s16le", 
+		"-ar", "48000", 
+		"-ac", "2", 
+		"-loglevel", "verbose", 
+		"pipe:1")
+	
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	
 	ffmpegOut, err := cmd.StdoutPipe()
 	if err != nil {
@@ -863,7 +872,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		return
 	}
 	
-	// Read stderr in a goroutine to prevent blocking
+	// Start the ffmpeg command
+	if err := cmd.Start(); err != nil {
+		log.Printf("playAudioStream: Error starting ffmpeg: %v", err)
+		return
+	}
+	
+	// Read stderr in a goroutine to capture FFmpeg errors
 	go func() {
 		// Recover from panic in goroutine
 		defer func() {
@@ -872,24 +887,17 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			}
 		}()
 		
-		scannerErr := bufio.NewScanner(stderr)
+		// Continuously read stderr to prevent blocking
+		scannerErr := bufio.NewScanner(&stderrBuf)
 		for scannerErr.Scan() {
-			log.Printf("FFmpeg: %s", scannerErr.Text())
+			line := scannerErr.Text()
+			if strings.Contains(line, "error") || strings.Contains(line, "Error") || strings.Contains(line, "failed") {
+				log.Printf("FFmpeg ERROR: %s", line)
+			} else {
+				log.Printf("FFmpeg: %s", line)
+			}
 		}
 	}()
-	
-	// Start the yt-dlp command
-	if err := ytCmd.Start(); err != nil {
-		log.Printf("playAudioStream: Error starting yt-dlp: %v", err)
-		return
-	}
-	
-	// Start the ffmpeg command
-	if err := cmd.Start(); err != nil {
-		log.Printf("playAudioStream: Error starting ffmpeg: %v", err)
-		ytCmd.Process.Kill()
-		return
-	}
 	
 	// Create a reader from the stdout pipe
 	reader := bufio.NewReader(ffmpegOut)
@@ -953,21 +961,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 	
-	// Kill the processes
-	if ytCmd.Process != nil {
-		ytCmd.Process.Kill()
-	}
+	// Kill the process if still running
 	if cmd.Process != nil {
 		cmd.Process.Kill()
 	}
 	
-	// Wait for processes to finish
-	if ytCmd.ProcessState == nil {
-		ytCmd.Wait()
-	}
-	if cmd.ProcessState == nil {
-		cmd.Wait()
-	}
+	// Wait for process to finish
+	cmd.Wait()
 }
 
 // playNextTrack plays the next track in the queue
