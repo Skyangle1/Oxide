@@ -851,7 +851,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	log.Printf("playAudioStream: Got direct URL: %s", directURL)
 	
 	// Create the ffmpeg command with the direct URL
-	// Using optimized args for Discord audio
+	// Using optimized args for Discord audio - ensuring correct format
 	cmd := exec.Command("ffmpeg", 
 		"-reconnect", "1", 
 		"-reconnect_streamed", "1", 
@@ -860,6 +860,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		"-f", "s16le", 
 		"-ar", "48000", 
 		"-ac", "2", 
+		"-vn", // No video
+		"-b:a", "128k", // Audio bitrate
 		"-loglevel", "verbose", 
 		"pipe:1")
 	
