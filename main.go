@@ -925,6 +925,12 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Buffer for audio frames
 	audioBuf := make([]byte, 960*2) // 20ms at 48kHz stereo 16-bit
 	
+	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	
+	frameCounter := 0
+	
 	for vc != nil && vc.Ready && vc.OpusSend != nil {
 		// Check if the voice connection is still active
 		if vc == nil || !vc.Ready {
@@ -949,15 +955,20 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		
 		if n > 0 && vc != nil && vc.OpusSend != nil {
+			// Wait for the next tick to maintain proper timing
+			<-ticker.C
+			
 			// Send the audio frame to Discord
 			select {
 			case vc.OpusSend <- audioBuf[:n]:
-			default:
-				// If channel is full, skip this frame
-				log.Println("playAudioStream: OpusSend channel is full, skipping frame")
+				frameCounter++
+			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
+				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
 			}
 		}
 	}
+	
+	log.Printf("playAudioStream: Sent %d audio frames", frameCounter)
 	
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 	
