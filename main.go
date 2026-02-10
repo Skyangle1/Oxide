@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -236,18 +237,18 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Get track info using yt-dlp with timeout
+	// Get track info using yt-dlp with timeout (20 seconds as requested)
 	log.Println("Sedang mencari lagu di YouTube...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	
 	track, err := getYoutubeInfoWithContext(ctx, sanitizedQuery)
 	if err != nil {
 		log.Printf("Error getting track info: %v", err)
 		
-		// Use follow-up message to respond after defer
+		// Use follow-up message to respond after defer with user-friendly error
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("Error getting track info: %v", err),
+			Content: "❌ Maaf Bre, lagunya gagal diambil. Coba link lain atau judul yang lebih spesifik!",
 		})
 		if err != nil {
 			log.Printf("Error sending follow-up message: %v", err)
@@ -272,6 +273,30 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	mutex.Unlock()
 
 	log.Printf("Added track '%s' to queue for guild %s", track.Title, i.GuildID)
+
+	// Check if bot is already in voice channel
+	vc, exists := s.VoiceConnections[i.GuildID]
+	if !exists || vc == nil {
+		// Auto-join voice channel if not already connected
+		log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
+		vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
+		if err != nil || vc == nil {
+			log.Printf("Error auto-joining voice channel: %v", err)
+			
+			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Content: "❌ Gagal join voice channel. Coba lagi nanti!",
+			})
+			if err != nil {
+				log.Printf("Error sending follow-up message: %v", err)
+			}
+			return
+		}
+		
+		// Wait for the connection to be ready
+		for !vc.Ready {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 
 	// If nothing is currently playing, start playback
 	if _, playing := currentTracks[i.GuildID]; !playing {
@@ -661,17 +686,18 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 	}
 	
 	// Create the command with context
-	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", "--dump-json", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--get-url", sanitizedURL)
+	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", "--dump-json", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--get-url", "--no-playlist", sanitizedURL)
 	
-	output, err := cmd.Output()
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	
+	err := cmd.Run()
 	if err != nil {
+		stderrContent := stderrBuf.String()
 		log.Printf("getYoutubeInfo: Error getting video info from yt-dlp: %v", err)
-		// Try to get stderr for more details
-		stderr, stderrErr := cmd.CombinedOutput()
-		if stderrErr != nil {
-			log.Printf("getYoutubeInfo: yt-dlp stderr: %s", string(stderr))
-		}
-		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, string(stderr))
+		log.Printf("getYoutubeInfo: yt-dlp stderr: %s", stderrContent)
+		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
 	}
 	
 	var info struct {
@@ -682,6 +708,7 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		WebpageURL string `json:"webpage_url"`
 	}
 	
+	output := stdoutBuf.Bytes()
 	if err := json.Unmarshal(output, &info); err != nil {
 		log.Printf("getYoutubeInfo: Error parsing video info JSON: %v", err)
 		return nil, fmt.Errorf("error parsing video info: %v", err)
@@ -752,7 +779,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		"-i", "-", "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "quiet", "pipe:1")
 	
 	// Create a pipe to feed yt-dlp output to ffmpeg
-	ytCmd := exec.Command("/usr/bin/yt-dlp", "-f", "bestaudio", "-o", "-", "--no-check-certificate", "--no-warnings", "--extract-audio", "--audio-format", "mp3", "--", sanitizedURL)
+	ytCmd := exec.Command("/usr/bin/yt-dlp", "-f", "bestaudio", "-o", "-", "--no-check-certificate", "--no-warnings", "--extract-audio", "--audio-format", "mp3", "--no-playlist", "--", sanitizedURL)
 	
 	stdout, err := ytCmd.StdoutPipe()
 	if err != nil {
@@ -840,8 +867,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 	
-	// Close the pipes and kill the processes
-	stdout.Close()
+	// Kill the processes
 	ytCmd.Process.Kill()
 	cmd.Process.Kill()
 	
