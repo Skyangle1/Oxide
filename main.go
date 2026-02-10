@@ -764,7 +764,20 @@ func formatDuration(seconds float64) string {
 
 // playAudioStream plays audio from a URL using yt-dlp and ffmpeg
 func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, requesterUsername string) {
+	// Recover from panic
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in playAudioStream: %v", r)
+		}
+	}()
+
 	log.Printf("playAudioStream: Starting to play audio for guild %s, URL: %s, requested by: %s", guildID, url, requesterUsername)
+	
+	// Perform nil check on voice connection
+	if vc == nil {
+		log.Printf("playAudioStream: Voice connection is nil")
+		return
+	}
 	
 	// Sanitize the URL
 	sanitizedURL := sanitizeURL(url)
@@ -803,6 +816,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	
 	// Read stderr in a goroutine to prevent blocking
 	go func() {
+		// Recover from panic in goroutine
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Recovered from panic in ffmpeg stderr reader: %v", r)
+			}
+		}()
+		
 		scannerErr := bufio.NewScanner(stderr)
 		for scannerErr.Scan() {
 			log.Printf("FFmpeg: %s", scannerErr.Text())
@@ -826,25 +846,32 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	reader := bufio.NewReader(ffmpegOut)
 	
 	// Send audio to Discord
-	vc.Speaking(true)
+	if vc != nil {
+		vc.Speaking(true)
+	}
+	
 	defer func() {
-		vc.Speaking(false)
+		if vc != nil {
+			vc.Speaking(false)
+		}
 		// Remove the current track from the map
 		mutex.Lock()
 		delete(currentTracks, guildID)
 		mutex.Unlock()
 		
-		// Play the next track if available
-		playNextTrack(session, &discordgo.InteractionCreate{}, vc.ChannelID)
+		// Play the next track if available and connection still exists
+		if vc != nil {
+			playNextTrack(session, &discordgo.InteractionCreate{}, vc.ChannelID)
+		}
 	}()
 	
 	// Buffer for audio frames
 	audioBuf := make([]byte, 960*2) // 20ms at 48kHz stereo 16-bit
 	
-	for vc.Ready && vc.OpusSend != nil {
+	for vc != nil && vc.Ready && vc.OpusSend != nil {
 		// Check if the voice connection is still active
-		if !vc.Ready {
-			log.Println("playAudioStream: Voice connection is not ready")
+		if vc == nil || !vc.Ready {
+			log.Println("playAudioStream: Voice connection is nil or not ready")
 			break
 		}
 		
@@ -853,37 +880,68 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				log.Println("playAudioStream: End of audio stream reached")
+				
+				// Handle end of stream - check if connection still exists before continuing
+				if vc != nil {
+					log.Println("playAudioStream: Checking connection after end of stream")
+				}
 				break
 			}
 			log.Printf("playAudioStream: Error reading audio: %v", err)
 			continue
 		}
 		
-		if n > 0 {
+		if n > 0 && vc != nil && vc.OpusSend != nil {
 			// Send the audio frame to Discord
-			vc.OpusSend <- audioBuf[:n]
+			select {
+			case vc.OpusSend <- audioBuf[:n]:
+			default:
+				// If channel is full, skip this frame
+				log.Println("playAudioStream: OpusSend channel is full, skipping frame")
+			}
 		}
 	}
 	
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 	
 	// Kill the processes
-	ytCmd.Process.Kill()
-	cmd.Process.Kill()
+	if ytCmd.Process != nil {
+		ytCmd.Process.Kill()
+	}
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
 	
 	// Wait for processes to finish
-	ytCmd.Wait()
-	cmd.Wait()
+	if ytCmd.ProcessState == nil {
+		ytCmd.Wait()
+	}
+	if cmd.ProcessState == nil {
+		cmd.Wait()
+	}
 }
 
 // playNextTrack plays the next track in the queue
 func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	// Recover from panic
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in playNextTrack: %v", r)
+		}
+	}()
+
 	var guildID string
 	if i != nil {
 		guildID = i.GuildID
 	} else {
 		// If called from inside playAudioStream, we need to determine the guildID differently
 		// This is a simplified approach - in practice, you'd need to track this differently
+		return
+	}
+	
+	// Validate guildID
+	if guildID == "" {
+		log.Printf("playNextTrack: Invalid guildID provided")
 		return
 	}
 	
@@ -896,19 +954,23 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 			// Check if anyone else is in the voice channel
 			guild, err := s.State.Guild(guildID)
 			if err != nil {
-				vc.Disconnect()
+				if vc != nil {
+					vc.Disconnect()
+				}
 				return
 			}
 			
 			for _, vs := range guild.VoiceStates {
-				if vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
+				if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
 					// Someone else is still in the channel, don't disconnect
 					return
 				}
 			}
 			
 			// No one else is in the channel, disconnect
-			vc.Disconnect()
+			if vc != nil {
+				vc.Disconnect()
+			}
 		}
 		return
 	}
@@ -929,12 +991,14 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}
 	
 	// Wait for the connection to be ready
-	for !vc.Ready {
+	for vc != nil && !vc.Ready {
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Start playing the audio stream
-	go playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+	if vc != nil {
+		go playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+	}
 }
 
 // Helper function to get user's voice state
