@@ -851,7 +851,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	log.Printf("playAudioStream: Got direct URL: %s", directURL)
 	
 	// Create the ffmpeg command with the direct URL
-	// Using optimized args for Discord audio - ensuring correct format
+	// Using exact args for Discord audio: -f s16le -ar 48000 -ac 2 pipe:1
 	cmd := exec.Command("ffmpeg", 
 		"-reconnect", "1", 
 		"-reconnect_streamed", "1", 
@@ -860,9 +860,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		"-f", "s16le", 
 		"-ar", "48000", 
 		"-ac", "2", 
-		"-vn", // No video
-		"-b:a", "128k", // Audio bitrate
-		"-loglevel", "verbose", 
+		"-loglevel", "quiet", // Reduced verbosity
 		"pipe:1")
 	
 	var stderrBuf bytes.Buffer
@@ -907,6 +905,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Send audio to Discord
 	if vc != nil {
 		vc.Speaking(true)
+		// Add delay to allow Discord to prepare for audio
+		time.Sleep(250 * time.Millisecond)
 	}
 	
 	defer func() {
@@ -924,8 +924,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 	}()
 	
-	// Buffer for audio frames
-	audioBuf := make([]byte, 960*2) // 20ms at 48kHz stereo 16-bit
+	// Buffer for audio frames - exact size for stereo 16-bit
+	audioBuf := make([]byte, 1920) // 960 samples * 2 bytes per sample * 2 channels
 	
 	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -963,6 +963,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			// Send the audio frame to Discord
 			select {
 			case vc.OpusSend <- audioBuf[:n]:
+				log.Printf("Sent %d bytes to Discord", n)
 				frameCounter++
 			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
 				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
