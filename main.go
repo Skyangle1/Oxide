@@ -947,7 +947,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			break
 		}
 		
-		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo)
+		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
 		n, err := io.ReadFull(reader, audioBuf)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
