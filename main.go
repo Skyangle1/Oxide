@@ -237,9 +237,9 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Get track info using yt-dlp with timeout (20 seconds as requested)
+	// Get track info using yt-dlp with timeout (60 seconds as requested)
 	log.Println("Sedang mencari lagu di YouTube...")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	
 	track, err := getYoutubeInfoWithContext(ctx, sanitizedQuery)
@@ -685,8 +685,18 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		return nil, fmt.Errorf("invalid URL provided")
 	}
 	
-	// Create the command with context
-	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", "--dump-json", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--get-url", "--no-playlist", sanitizedURL)
+	// Create the command with context and additional flags
+	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", 
+		"--dump-json", 
+		"-f", "bestaudio", 
+		"--no-check-certificate", 
+		"--no-warnings", 
+		"--get-url", 
+		"--no-playlist", 
+		"--force-overwrites",
+		"--quiet",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+		sanitizedURL)
 	
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
@@ -696,7 +706,7 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 	if err != nil {
 		stderrContent := stderrBuf.String()
 		log.Printf("getYoutubeInfo: Error getting video info from yt-dlp: %v", err)
-		log.Printf("getYoutubeInfo: yt-dlp stderr: %s", stderrContent)
+		log.Println("getYoutubeInfo: yt-dlp stderr: " + stderrContent) // Print detailed error to log
 		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
 	}
 	
