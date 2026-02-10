@@ -931,8 +931,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 	}()
 	
-	// Buffer for audio frames - exact size for stereo 16-bit
-	audioBuf := make([]byte, 1920) // 960 samples * 2 bytes per sample * 2 channels
+	// Buffer for audio frames - exact size for stereo 16-bit PCM
+	audioBuf := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
 	
 	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -970,7 +970,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			// Send the audio frame to Discord
 			select {
 			case vc.OpusSend <- audioBuf[:n]:
-				log.Printf("Sent %d bytes to Discord", n)
+				log.Printf("Sent %d bytes to Discord as PCM", n)
 				frameCounter++
 			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
 				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
