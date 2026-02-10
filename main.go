@@ -693,9 +693,8 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		"-f", "bestaudio", 
 		"--no-check-certificate", 
 		"--no-warnings", 
-		"--get-url", 
-		"--no-playlist", 
-		"--force-overwrites",
+		"--flat-playlist", 
+		"-4", // Force IPv4
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
 		sanitizedURL)
 	
@@ -723,6 +722,21 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
 	}
 	
+	output := stdoutBuf.Bytes()
+	
+	// Validate output before parsing JSON
+	if len(output) == 0 {
+		log.Printf("getYoutubeInfo: Empty output from yt-dlp")
+		return nil, fmt.Errorf("empty output from yt-dlp for URL: %s", sanitizedURL)
+	}
+	
+	// Check if output starts with unexpected character (like 'h')
+	if len(output) > 0 && output[0] != '{' {
+		outputStr := string(output)
+		log.Printf("getYoutubeInfo: Unexpected output format, starts with: '%c', full output: %s", output[0], outputStr)
+		return nil, fmt.Errorf("unexpected output format from yt-dlp: %s", outputStr)
+	}
+	
 	var info struct {
 		Title     string `json:"title"`
 		Duration  float64 `json:"duration"`
@@ -731,9 +745,9 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		WebpageURL string `json:"webpage_url"`
 	}
 	
-	output := stdoutBuf.Bytes()
 	if err := json.Unmarshal(output, &info); err != nil {
 		log.Printf("getYoutubeInfo: Error parsing video info JSON: %v", err)
+		log.Printf("getYoutubeInfo: Raw output was: %s", string(output))
 		return nil, fmt.Errorf("error parsing video info: %v", err)
 	}
 	
