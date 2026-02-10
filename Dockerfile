@@ -1,58 +1,42 @@
-# Multi-stage Dockerfile for Oxide Music Bot
-
 # Build stage
 FROM golang:1.21-alpine AS builder
-
-# Install dependencies needed for building
 RUN apk add --no-cache git ca-certificates
-
-# Set working directory
 WORKDIR /app
-
-# Copy go mod files
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
-
-# Copy source code
 COPY . .
-
-# Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o oxide-music-bot .
 
 # Runtime stage
 FROM alpine:latest
 
-# Install packages needed at runtime
+# 1. Tambahin python3 (yt-dlp butuh ini buat jalan!)
 RUN apk --no-cache add \
     ca-certificates \
     ffmpeg \
     curl \
-    wget
+    wget \
+    python3
 
-# Download yt-dlp binary directly to avoid pip issues
-RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp
+# 2. Download yt-dlp ke /usr/bin biar lebih gampang ditemu sama sistem
+RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/bin/yt-dlp && \
+    chmod a+rx /usr/bin/yt-dlp
 
-# Create a non-root user
+# 3. Setup User
 RUN addgroup -g 65532 appgroup && \
     adduser -D -u 65532 -G appgroup appuser
 
-# Set working directory
 WORKDIR /app
 
-# Copy the binary from the builder stage
+# 4. Copy file bot
 COPY --from=builder /app/oxide-music-bot .
 
-# Change ownership to the non-root user
+# 5. Siapin folder cache dan pastiin izinnya pas
 RUN mkdir -p /app/cache && chown -R appuser:appgroup /app
 
-# Switch to non-root user
+# 6. Set PATH secara eksplisit biar gak ada error 127 lagi
+ENV PATH="/usr/bin:/usr/local/bin:${PATH}"
+
 USER appuser
 
-# Expose port (though Discord bots don't typically expose ports)
-EXPOSE 8080
-
-# Run the binary
 CMD ["./oxide-music-bot"]
