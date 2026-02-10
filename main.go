@@ -860,7 +860,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		"-f", "s16le", 
 		"-ar", "48000", 
 		"-ac", "2", 
-		"-loglevel", "quiet", // Reduced verbosity
+		"-loglevel", "error", // Show only errors
 		"pipe:1")
 	
 	var stderrBuf bytes.Buffer
@@ -891,16 +891,23 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		scannerErr := bufio.NewScanner(&stderrBuf)
 		for scannerErr.Scan() {
 			line := scannerErr.Text()
-			if strings.Contains(line, "error") || strings.Contains(line, "Error") || strings.Contains(line, "failed") {
-				log.Printf("FFmpeg ERROR: %s", line)
-			} else {
-				log.Printf("FFmpeg: %s", line)
-			}
+			log.Printf("FFmpeg: %s", line)
 		}
 	}()
 	
 	// Create a reader from the stdout pipe
 	reader := bufio.NewReader(ffmpegOut)
+	
+	// Wait for the voice connection to be ready
+	for vc != nil && !vc.Ready {
+		time.Sleep(10 * time.Millisecond)
+	}
+	
+	// Check if voice connection is ready before proceeding
+	if vc == nil || !vc.Ready {
+		log.Println("playAudioStream: Voice connection is not ready")
+		return
+	}
 	
 	// Send audio to Discord
 	if vc != nil {
@@ -940,7 +947,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			break
 		}
 		
-		// Read audio frame from ffmpeg
+		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo)
 		n, err := io.ReadFull(reader, audioBuf)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
