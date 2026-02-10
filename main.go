@@ -685,6 +685,8 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		return nil, fmt.Errorf("invalid URL provided")
 	}
 	
+	log.Printf("getYoutubeInfo: Sanitized URL: %s", sanitizedURL)
+	
 	// Create the command with context and additional flags
 	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", 
 		"--dump-json", 
@@ -694,7 +696,6 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		"--get-url", 
 		"--no-playlist", 
 		"--force-overwrites",
-		"--quiet",
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
 		sanitizedURL)
 	
@@ -707,6 +708,18 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		stderrContent := stderrBuf.String()
 		log.Printf("getYoutubeInfo: Error getting video info from yt-dlp: %v", err)
 		log.Println("getYoutubeInfo: yt-dlp stderr: " + stderrContent) // Print detailed error to log
+		
+		// Check for specific error conditions
+		if strings.Contains(stderrContent, "Unsupported URL") {
+			return nil, fmt.Errorf("unsupported URL: %s", sanitizedURL)
+		} else if strings.Contains(stderrContent, "This video is unavailable") {
+			return nil, fmt.Errorf("video unavailable: %s", sanitizedURL)
+		} else if strings.Contains(stderrContent, "Sign in to confirm your age") {
+			return nil, fmt.Errorf("age restricted video: %s", sanitizedURL)
+		} else if strings.Contains(stderrContent, "This live event will begin in") {
+			return nil, fmt.Errorf("scheduled live event: %s", sanitizedURL)
+		}
+		
 		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
 	}
 	
@@ -722,6 +735,11 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 	if err := json.Unmarshal(output, &info); err != nil {
 		log.Printf("getYoutubeInfo: Error parsing video info JSON: %v", err)
 		return nil, fmt.Errorf("error parsing video info: %v", err)
+	}
+	
+	// Validate that we got meaningful data
+	if info.Title == "" {
+		return nil, fmt.Errorf("could not retrieve title for URL: %s", sanitizedURL)
 	}
 	
 	// Format duration
@@ -741,16 +759,23 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 
 // sanitizeURL sanitizes the URL to prevent command injection
 func sanitizeURL(input string) string {
+	// Trim whitespace
+	input = strings.TrimSpace(input)
+	
+	// Handle shortened YouTube URLs (youtu.be)
+	if strings.HasPrefix(input, "youtu.be/") {
+		input = "https://" + input
+	} else if strings.HasPrefix(input, "http://youtu.be/") || strings.HasPrefix(input, "https://youtu.be/") {
+		// Already a proper URL
+	} else if !strings.HasPrefix(input, "http://") && !strings.HasPrefix(input, "https://") {
+		// If it doesn't start with http/https, it might be a search query
+		// For search queries, we'll return as-is to be handled by yt-dlp
+		return input
+	}
+	
 	// Only allow alphanumeric characters, hyphens, underscores, periods, slashes, colons, and question marks
 	reg := regexp.MustCompile(`[^a-zA-Z0-9\-_.~:/?#\[\]@!$&'()*+,;=%]+`)
 	sanitized := reg.ReplaceAllString(input, "")
-	
-	// Ensure it starts with http:// or https://
-	if !strings.HasPrefix(sanitized, "http://") && !strings.HasPrefix(sanitized, "https://") {
-		// If it doesn't start with http/https, it might be a search query
-		// For search queries, we'll validate differently
-		return input
-	}
 	
 	return sanitized
 }
