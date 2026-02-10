@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,7 @@ type Track struct {
 	Uploader    string
 	Thumbnail   string
 	RequesterID string
+	RequesterUsername string
 }
 
 // MusicQueue represents a queue of tracks
@@ -188,54 +190,80 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 // handlePlayCommand handles the play command
 func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	log.Printf("handlePlayCommand: Received play command from user %s in guild %s", i.Member.User.Username, i.GuildID)
+	username := i.Member.User.Username
+	log.Println("Perintah /play diterima dari: " + username)
 	
-	// Defer the response to prevent timeout
+	// Defer the response to prevent timeout - MUST BE DONE IN THE FIRST FEW MILLISECONDS
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 	if err != nil {
-		log.Printf("handlePlayCommand: Error deferring interaction: %v", err)
+		log.Printf("Error deferring interaction: %v", err)
 		return
 	}
 
 	// Get the query from options
 	query := i.ApplicationCommandData().Options[0].StringValue()
-	log.Printf("handlePlayCommand: Processing query: %s", query)
+	log.Printf("Processing query: %s", query)
 	
 	// Validate the URL to prevent command injection
 	sanitizedQuery := sanitizeURL(query)
 	if sanitizedQuery == "" {
-		log.Printf("handlePlayCommand: Invalid URL provided by user %s: %s", i.Member.User.Username, query)
-		editOriginalResponse(s, i, "Invalid URL provided. Please provide a valid URL or search query.")
+		log.Printf("Invalid URL provided by user %s: %s", username, query)
+		
+		// Use follow-up message to respond after defer
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Invalid URL provided. Please provide a valid URL or search query.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
 	// Get the voice channel the user is connected to
 	voiceState, err := getVoiceState(s, i.Member.User.ID, i.GuildID)
 	if err != nil {
-		log.Printf("handlePlayCommand: User %s not in voice channel: %v", i.Member.User.Username, err)
-		editOriginalResponse(s, i, "You must be connected to a voice channel to use this command.")
+		log.Printf("User %s not in voice channel: %v", username, err)
+		
+		// Use follow-up message to respond after defer
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be connected to a voice channel to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
-	// Get track info using yt-dlp
-	log.Printf("handlePlayCommand: Getting track info for: %s", sanitizedQuery)
-	track, err := getYoutubeInfo(sanitizedQuery)
+	// Get track info using yt-dlp with timeout
+	log.Println("Sedang mencari lagu di YouTube...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	track, err := getYoutubeInfoWithContext(ctx, sanitizedQuery)
 	if err != nil {
-		log.Printf("handlePlayCommand: Error getting track info: %v", err)
-		editOriginalResponse(s, i, fmt.Sprintf("Error getting track info: %v", err))
+		log.Printf("Error getting track info: %v", err)
+		
+		// Use follow-up message to respond after defer
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Error getting track info: %v", err),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 	
 	// Set the requester
 	track.RequesterID = i.Member.User.ID
+	track.RequesterUsername = username
 
 	// Create or get the music queue for this guild
 	mutex.Lock()
 	queue, exists := musicQueues[i.GuildID]
 	if !exists {
-		log.Printf("handlePlayCommand: Creating new queue for guild %s", i.GuildID)
+		log.Printf("Creating new queue for guild %s", i.GuildID)
 		queue = &MusicQueue{}
 		musicQueues[i.GuildID] = queue
 	}
@@ -243,16 +271,29 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	queue.Tracks = append(queue.Tracks, track)
 	mutex.Unlock()
 
-	log.Printf("handlePlayCommand: Added track '%s' to queue for guild %s", track.Title, i.GuildID)
+	log.Printf("Added track '%s' to queue for guild %s", track.Title, i.GuildID)
 
 	// If nothing is currently playing, start playback
 	if _, playing := currentTracks[i.GuildID]; !playing {
-		log.Printf("handlePlayCommand: Nothing playing, starting playback for guild %s", i.GuildID)
+		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
 		playNextTrack(s, i, voiceState.ChannelID)
+		
+		// Use follow-up message to respond after defer
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Now playing: `%s`", track.Title),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 	} else {
 		// Send a message that the track was added to the queue
-		log.Printf("handlePlayCommand: Track added to queue, currently playing another track in guild %s", i.GuildID)
-		editOriginalResponse(s, i, fmt.Sprintf("Added `%s` to the queue.", track.Title))
+		log.Printf("Track added to queue, currently playing another track in guild %s", i.GuildID)
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Added `%s` to the queue.", track.Title),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 	}
 }
 
@@ -269,18 +310,33 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Check if the user is in the same voice channel as the bot
 	voiceState, err := getVoiceState(s, i.Member.User.ID, i.GuildID)
 	if err != nil {
-		editOriginalResponse(s, i, "You must be connected to a voice channel to use this command.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be connected to a voice channel to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
 	vc, err := getConnectedVoiceConnection(s, i.GuildID)
 	if err != nil || vc == nil {
-		editOriginalResponse(s, i, "Not connected to a voice channel.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Not connected to a voice channel.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
 	if vc.ChannelID != voiceState.ChannelID {
-		editOriginalResponse(s, i, "You must be in the same voice channel as the bot to use this command.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be in the same voice channel as the bot to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
@@ -290,7 +346,12 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Play the next track
 	playNextTrack(s, i, voiceState.ChannelID)
 	
-	editOriginalResponse(s, i, "Skipped the current track.")
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: "Skipped the current track.",
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
 }
 
 // handleStopCommand handles the stop command
@@ -306,18 +367,33 @@ func handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Check if the user is in the same voice channel as the bot
 	voiceState, err := getVoiceState(s, i.Member.User.ID, i.GuildID)
 	if err != nil {
-		editOriginalResponse(s, i, "You must be connected to a voice channel to use this command.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be connected to a voice channel to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
 	vc, err := getConnectedVoiceConnection(s, i.GuildID)
 	if err != nil || vc == nil {
-		editOriginalResponse(s, i, "Not connected to a voice channel.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Not connected to a voice channel.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
 	if vc.ChannelID != voiceState.ChannelID {
-		editOriginalResponse(s, i, "You must be in the same voice channel as the bot to use this command.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be in the same voice channel as the bot to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
@@ -331,7 +407,12 @@ func handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	
 	vc.Disconnect()
 	
-	editOriginalResponse(s, i, "Stopped playback and cleared the queue.")
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: "Stopped playback and cleared the queue.",
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
 }
 
 // handleQueueCommand handles the queue command
@@ -346,7 +427,12 @@ func handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	queue, exists := musicQueues[i.GuildID]
 	if !exists || len(queue.Tracks) == 0 {
-		editOriginalResponse(s, i, "The queue is empty.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "The queue is empty.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
@@ -354,10 +440,15 @@ func handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	queueMsg.WriteString("**Music Queue:**\n")
 	
 	for idx, track := range queue.Tracks {
-		queueMsg.WriteString(fmt.Sprintf("%d. %s - Requested by <@%s>\n", idx+1, track.Title, track.RequesterID))
+		queueMsg.WriteString(fmt.Sprintf("%d. %s - Requested by %s\n", idx+1, track.Title, track.RequesterUsername))
 	}
 	
-	editOriginalResponse(s, i, queueMsg.String())
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: queueMsg.String(),
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
 }
 
 // handleNowPlayingCommand handles the now playing command
@@ -372,7 +463,12 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 
 	currentTrack, exists := currentTracks[i.GuildID]
 	if !exists {
-		editOriginalResponse(s, i, "Nothing is currently playing.")
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Nothing is currently playing.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 		return
 	}
 
@@ -392,7 +488,7 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 			},
 			{
 				Name:  "Requested by",
-				Value: fmt.Sprintf("<@%s>", currentTrack.RequesterID),
+				Value: currentTrack.RequesterUsername,
 				Inline: true,
 			},
 		},
@@ -434,13 +530,13 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		},
 	}
 
-	// Send the embed with buttons
-	_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Embeds: &[]*discordgo.MessageEmbed{embed},
-		Components: &components,
+	// Send the embed with buttons using follow-up
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Embeds:     []*discordgo.MessageEmbed{embed},
+		Components: components,
 	})
 	if err != nil {
-		log.Printf("Error editing interaction response: %v", err)
+		log.Printf("Error sending follow-up message: %v", err)
 	}
 }
 
@@ -490,7 +586,6 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 	switch {
 	case strings.HasPrefix(buttonID, "pause_resume"):
 		// Toggle pause/resume
-		// In a real implementation, this would pause/resume the audio stream
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
@@ -554,43 +649,8 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 }
 
-// Helper function to get user's voice state
-func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.VoiceState, error) {
-	guild, err := s.State.Guild(guildID)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, vs := range guild.VoiceStates {
-		if vs.UserID == userID {
-			return vs, nil
-		}
-	}
-
-	return nil, fmt.Errorf("user not in a voice channel")
-}
-
-// Helper function to get connected voice connection
-func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discordgo.VoiceConnection, error) {
-	vc, exists := s.VoiceConnections[guildID]
-	if !exists || vc == nil {
-		return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
-	}
-	return vc, nil
-}
-
-// Helper function to edit the original response
-func editOriginalResponse(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
-	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &content,
-	})
-	if err != nil {
-		log.Printf("Error editing interaction response: %v", err)
-	}
-}
-
-// getYoutubeInfo gets video info using yt-dlp
-func getYoutubeInfo(url string) (*Track, error) {
+// getYoutubeInfoWithContext gets video info using yt-dlp with context timeout
+func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) {
 	log.Printf("getYoutubeInfo: Processing URL: %s", url)
 	
 	// Sanitize the URL to prevent command injection
@@ -600,7 +660,8 @@ func getYoutubeInfo(url string) (*Track, error) {
 		return nil, fmt.Errorf("invalid URL provided")
 	}
 	
-	cmd := exec.Command("/usr/bin/yt-dlp", "--dump-json", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--extract-audio", "--audio-format", "mp3", sanitizedURL)
+	// Create the command with context
+	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", "--dump-json", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--get-url", sanitizedURL)
 	
 	output, err := cmd.Output()
 	if err != nil {
@@ -629,6 +690,7 @@ func getYoutubeInfo(url string) (*Track, error) {
 	// Format duration
 	durationStr := formatDuration(info.Duration)
 	
+	log.Printf("yt-dlp berhasil dapet link: " + info.WebpageURL)
 	log.Printf("getYoutubeInfo: Successfully retrieved info for '%s'", info.Title)
 	
 	return &Track{
@@ -648,9 +710,9 @@ func sanitizeURL(input string) string {
 	
 	// Ensure it starts with http:// or https://
 	if !strings.HasPrefix(sanitized, "http://") && !strings.HasPrefix(sanitized, "https://") {
-		// If it doesn't start with http/https, it's likely not a valid URL
-		// In a real implementation, you might want to handle search queries differently
-		return ""
+		// If it doesn't start with http/https, it might be a search query
+		// For search queries, we'll validate differently
+		return input
 	}
 	
 	return sanitized
@@ -674,11 +736,13 @@ func formatDuration(seconds float64) string {
 }
 
 // playAudioStream plays audio from a URL using yt-dlp and ffmpeg
-func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) {
+func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, requesterUsername string) {
+	log.Printf("playAudioStream: Starting to play audio for guild %s, URL: %s, requested by: %s", guildID, url, requesterUsername)
+	
 	// Sanitize the URL
 	sanitizedURL := sanitizeURL(url)
 	if sanitizedURL == "" {
-		log.Printf("Invalid URL provided: %s", url)
+		log.Printf("playAudioStream: Invalid URL provided: %s", url)
 		return
 	}
 	
@@ -692,7 +756,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 	
 	stdout, err := ytCmd.StdoutPipe()
 	if err != nil {
-		log.Printf("Error creating stdout pipe: %v", err)
+		log.Printf("playAudioStream: Error creating stdout pipe: %v", err)
 		return
 	}
 	
@@ -700,32 +764,15 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 	
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		log.Printf("Error creating stderr pipe: %v", err)
+		log.Printf("playAudioStream: Error creating stderr pipe: %v", err)
 		return
 	}
 	
 	ffmpegOut, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Printf("Error creating ffmpeg output pipe: %v", err)
+		log.Printf("playAudioStream: Error creating ffmpeg output pipe: %v", err)
 		return
 	}
-	
-	// Start the yt-dlp command
-	if err := ytCmd.Start(); err != nil {
-		log.Printf("Error starting yt-dlp: %v", err)
-		return
-	}
-	
-	// Start the ffmpeg command
-	if err := cmd.Start(); err != nil {
-		log.Printf("Error starting ffmpeg: %v", err)
-		ytCmd.Process.Kill()
-		return
-	}
-	
-	// Create a scanner to read from ffmpeg output
-	scanner := bufio.NewScanner(ffmpegOut)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
 	
 	// Read stderr in a goroutine to prevent blocking
 	go func() {
@@ -734,6 +781,22 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 			log.Printf("FFmpeg: %s", scannerErr.Text())
 		}
 	}()
+	
+	// Start the yt-dlp command
+	if err := ytCmd.Start(); err != nil {
+		log.Printf("playAudioStream: Error starting yt-dlp: %v", err)
+		return
+	}
+	
+	// Start the ffmpeg command
+	if err := cmd.Start(); err != nil {
+		log.Printf("playAudioStream: Error starting ffmpeg: %v", err)
+		ytCmd.Process.Kill()
+		return
+	}
+	
+	// Create a reader from the stdout pipe
+	reader := bufio.NewReader(ffmpegOut)
 	
 	// Send audio to Discord
 	vc.Speaking(true)
@@ -751,13 +814,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 	// Buffer for audio frames
 	audioBuf := make([]byte, 960*2) // 20ms at 48kHz stereo 16-bit
 	
-	// Create a reader from the stdout pipe
-	reader := bufio.NewReader(ffmpegOut)
-	
 	for vc.Ready && vc.OpusSend != nil {
 		// Check if the voice connection is still active
 		if !vc.Ready {
-			log.Println("Voice connection is not ready")
+			log.Println("playAudioStream: Voice connection is not ready")
 			break
 		}
 		
@@ -765,10 +825,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 		n, err := io.ReadFull(reader, audioBuf)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				log.Println("End of audio stream reached")
+				log.Println("playAudioStream: End of audio stream reached")
 				break
 			}
-			log.Printf("Error reading audio: %v", err)
+			log.Printf("playAudioStream: Error reading audio: %v", err)
 			continue
 		}
 		
@@ -777,6 +837,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string) 
 			vc.OpusSend <- audioBuf[:n]
 		}
 	}
+	
+	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 	
 	// Close the pipes and kill the processes
 	stdout.Close()
@@ -836,7 +898,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	// Connect to voice channel if not already connected
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 	if err != nil || vc == nil {
-		log.Printf("Error joining voice channel: %v", err)
+		log.Printf("playNextTrack: Error joining voice channel: %v", err)
 		return
 	}
 	
@@ -846,5 +908,30 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}
 
 	// Start playing the audio stream
-	go playAudioStream(vc, nextTrack.URL, guildID)
+	go playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+}
+
+// Helper function to get user's voice state
+func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.VoiceState, error) {
+	guild, err := s.State.Guild(guildID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, vs := range guild.VoiceStates {
+		if vs.UserID == userID {
+			return vs, nil
+		}
+	}
+
+	return nil, fmt.Errorf("user not in a voice channel")
+}
+
+// Helper function to get connected voice connection
+func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discordgo.VoiceConnection, error) {
+	vc, exists := s.VoiceConnections[guildID]
+	if !exists || vc == nil {
+		return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
+	}
+	return vc, nil
 }
