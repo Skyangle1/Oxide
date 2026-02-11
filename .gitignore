@@ -1,0 +1,21 @@
+# Compiled binaries
+oxide-music-bot
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment specific files
+.env
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db

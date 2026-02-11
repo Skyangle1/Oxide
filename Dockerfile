@@ -61,8 +61,6 @@ RUN chown -R appuser:appgroup /app
 # Switch to non-root user
 USER appuser
 
-# Expose port (though Discord bots don't typically expose ports)
-EXPOSE 8080
 
 # Run the binary
 CMD ["./oxide-music-bot"]

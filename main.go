@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -74,6 +75,75 @@ type MusicQueue struct {
 	Loop   bool
 }
 
+// SavedPlaylist represents a user's saved playlist
+type SavedPlaylist struct {
+	Name  string
+	Tracks []*Track
+}
+
+// UserPreferences holds user-specific settings
+type UserPreferences struct {
+	Volume float64 // Volume level (0.0 to 1.0)
+	SavedPlaylists map[string]*SavedPlaylist
+}
+
+// Global variable for user preferences
+var (
+	userPreferences = make(map[string]*UserPreferences)
+	prefsMutex sync.RWMutex
+)
+
+// RateLimiter tracks user requests to prevent abuse
+type RateLimiter struct {
+	requests map[string][]time.Time
+	mutex    sync.RWMutex
+}
+
+// AddRequest adds a request timestamp for a user
+func (rl *RateLimiter) AddRequest(userID string) {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+	
+	now := time.Now()
+	
+	// Initialize slice if needed
+	if rl.requests[userID] == nil {
+		rl.requests[userID] = make([]time.Time, 0)
+	}
+	
+	// Add current request
+	rl.requests[userID] = append(rl.requests[userID], now)
+	
+	// Remove requests older than 1 minute
+	cutoff := now.Add(-1 * time.Minute)
+	filtered := make([]time.Time, 0)
+	for _, reqTime := range rl.requests[userID] {
+		if reqTime.After(cutoff) {
+			filtered = append(filtered, reqTime)
+		}
+	}
+	rl.requests[userID] = filtered
+}
+
+// IsLimited checks if a user has exceeded the rate limit (max 5 requests per minute)
+func (rl *RateLimiter) IsLimited(userID string) bool {
+	rl.mutex.RLock()
+	defer rl.mutex.RUnlock()
+	
+	requests := rl.requests[userID]
+	
+	// Check if user has more than 5 requests in the last minute
+	return len(requests) > 5
+}
+
+// Maximum number of tracks allowed in the queue to prevent memory leaks
+const MaxQueueSize = 50
+
+// Global variables for command options
+var (
+	zero = 0
+)
+
 // Global variables
 var (
 	// Session for Discord
@@ -87,6 +157,11 @@ var (
 
 	// Allowed users for exclusive access
 	AllowedUsers map[string]bool
+	
+	// Rate limiter to prevent abuse
+	rateLimiter = &RateLimiter{
+		requests: make(map[string][]time.Time),
+	}
 )
 
 func main() {
@@ -186,6 +261,49 @@ func registerCommands(appID string) {
 			Name:        "oxide-nowplaying",
 			Description: "Show the currently playing track",
 		},
+		{
+			Name:        "oxide-volume",
+			Description: "Set volume level (0-100%)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "level",
+					Description: "Volume level (0-100)",
+					Required:    true,
+					MaxValue:    100,
+				},
+			},
+		},
+		{
+			Name:        "oxide-saveplaylist",
+			Description: "Save a track to a playlist",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "Playlist name",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "url",
+					Description: "URL of the track to save",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "oxide-loadplaylist",
+			Description: "Load a playlist to the queue",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "Playlist name",
+					Required:    true,
+				},
+			},
+		},
 	}
 
 	// Determine the application ID to use
@@ -209,256 +327,279 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// Check if the message author is in the allowed users list
-	if !AllowedUsers[m.Author.ID] {
-		// Send a strong message to unauthorized users
-		s.ChannelMessageSend(m.ChannelID, "❌ **PERINGATAN KERAS!** ❌\n\nAnda tidak memiliki izin untuk menggunakan bot ini. Bot ini hanya untuk penggunaan eksklusif oleh dua orang yang telah ditentukan. Mohon tinggalkan channel ini dan jangan coba-coba mengakses fitur ini lagi.")
-		return
-	}
-
-	// Update user stats for the message
-	updateUserStats(m.Author.ID)
-
 	// Convert message to lowercase for case-insensitive comparison
 	lowerContent := strings.ToLower(m.Content)
 
-	// Check if the message starts with "lyre play" or "queen play" (case insensitive)
-	if strings.HasPrefix(lowerContent, "lyre play") || strings.HasPrefix(lowerContent, "queen play") {
-		// Extract the URL or search query after "play"
-		parts := strings.Fields(m.Content)
-		if len(parts) < 3 {
-			s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query to play.")
+	// Check if the message starts with "lyre" or "queen" (case insensitive) - only process commands
+	if strings.HasPrefix(lowerContent, "lyre") || strings.HasPrefix(lowerContent, "queen") {
+		// Check if the message author is in the allowed users list
+		if !AllowedUsers[m.Author.ID] {
+			// Send a strong message to unauthorized users
+			s.ChannelMessageSend(m.ChannelID, "❌ **PERINGATAN KERAS!** ❌\n\nAnda tidak memiliki izin untuk menggunakan bot ini. Bot ini hanya untuk penggunaan eksklusif oleh dua orang yang telah ditentukan. Mohon tinggalkan channel ini dan jangan coba-coba mengakses fitur ini lagi.")
 			return
 		}
 
-		// Find the index of "play" to extract everything after it
-		playIndex := -1
-		for i, part := range parts {
-			if strings.ToLower(part) == "play" && i < len(parts)-1 {
-				playIndex = i
-				break
-			}
-		}
+		// Update user stats for the message
+		updateUserStats(m.Author.ID)
 
-		if playIndex == -1 || playIndex >= len(parts)-1 {
-			s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query to play.")
-			return
-		}
-
-		// Extract the query (everything after "play")
-		queryParts := parts[playIndex+1:]
-		query := strings.Join(queryParts, " ")
-
-		// Create a mock interaction to reuse the existing play command logic
-		go func() {
-			// Get voice state to check if user is in a voice channel
-			voiceState, err := getVoiceState(s, m.Author.ID, m.GuildID)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, "You must be connected to a voice channel to use this command.")
+		// Check if the message starts with "lyre play" or "queen play" (case insensitive)
+		if strings.HasPrefix(lowerContent, "lyre play") || strings.HasPrefix(lowerContent, "queen play") {
+			// Check rate limit for play commands
+			rateLimiter.AddRequest(m.Author.ID)
+			if rateLimiter.IsLimited(m.Author.ID) {
+				s.ChannelMessageSend(m.ChannelID, "❌ Terlalu banyak permintaan! Harap tunggu sebentar sebelum meminta lagu lagi.")
 				return
 			}
 
-			// Get track info using yt-dlp
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			
-			track, err := getYoutubeInfoWithContext(ctx, query)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+			// Extract the URL or search query after "play"
+			parts := strings.Fields(m.Content)
+			if len(parts) < 3 {
+				s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query to play.")
 				return
 			}
-			
-			// Set the requester
-			track.RequesterID = m.Author.ID
-			track.RequesterUsername = m.Author.Username
 
-			// Create or get the music queue for this guild
-			mutex.Lock()
-			guildCtx, exists := guildContexts[m.GuildID]
-			if !exists {
-				log.Printf("Creating new guild context for guild %s", m.GuildID)
-				guildCtx = &GuildContext{
-					MusicQueue: &MusicQueue{},
+			// Find the index of "play" to extract everything after it
+			playIndex := -1
+			for i, part := range parts {
+				if strings.ToLower(part) == "play" && i < len(parts)-1 {
+					playIndex = i
+					break
 				}
-				guildContexts[m.GuildID] = guildCtx
 			}
 
-			if guildCtx.MusicQueue == nil {
-				guildCtx.MusicQueue = &MusicQueue{}
+			if playIndex == -1 || playIndex >= len(parts)-1 {
+				s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query to play.")
+				return
 			}
-			
-			guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
-			mutex.Unlock()
 
-			log.Printf("Added track '%s' to queue for guild %s", track.Title, m.GuildID)
+			// Extract the query (everything after "play")
+			queryParts := parts[playIndex+1:]
+			query := strings.Join(queryParts, " ")
 
-			// Check if bot is already in voice channel
-			vc, exists := s.VoiceConnections[m.GuildID]
-			if !exists || vc == nil {
-				// Auto-join voice channel if not already connected
-				log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
-				vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
-				if err != nil || vc == nil {
-					log.Printf("Error auto-joining voice channel: %v", err)
-					
-					s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
+			// Create a mock interaction to reuse the existing play command logic
+			go func() {
+				// Get voice state to check if user is in a voice channel
+				voiceState, err := getVoiceState(s, m.Author.ID, m.GuildID)
+				if err != nil {
+					s.ChannelMessageSend(m.ChannelID, "You must be connected to a voice channel to use this command.")
 					return
 				}
-				
-				// Wait for the connection to be ready
-				for !vc.Ready {
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
 
-			// If nothing is currently playing, start playback
-			var tempGuildCtx *GuildContext
-			var tempExists bool
-			var hasTrack bool
-			mutex.RLock()
-			tempGuildCtx, tempExists = guildContexts[m.GuildID]
-			hasTrack = false
-			if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
-				hasTrack = true
-			}
-			mutex.RUnlock()
-			
-			if !hasTrack {
-				log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
-				playNextTrack(s, m.GuildID, voiceState.ChannelID)
+				// Get track info using yt-dlp
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
 
-				// Send enhanced now playing message with love points
-				statsMutex.RLock()
-				userStat, exists := userStats[m.Author.ID]
-				statsMutex.RUnlock()
-				
-				level := 0
-				lovePoints := 0
-				if exists && userStat != nil {
-					level = userStat.Level
-					lovePoints = userStat.LovePoints
+				track, err := getYoutubeInfoWithContext(ctx, query)
+				if err != nil {
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+					return
 				}
-				
-				// Create a more detailed "Now Playing" message
-				nowPlayingMessage := fmt.Sprintf(
-					"🎵 **Now Playing:** `%s`\n"+
-					"👤 **Requested by:** %s **(Level %d)**\n"+
-					"⏱️ **Duration:** %s\n"+
-					"💝 **Love Points:** %d",
-					track.Title,
-					m.Author.Username,
-					level,
-					track.Duration,
-					lovePoints,
-				)
-				
-				// Send the message with embed if thumbnail is available
-				if track.Thumbnail != "" {
-					embed := &discordgo.MessageEmbed{
-						Title:       "🎵 Now Playing",
-						URL:         track.URL,
-						Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
-						Fields: []*discordgo.MessageEmbedField{
-							{
-								Name:  "👤 Requested by",
-								Value: fmt.Sprintf("%s (Level %d)", m.Author.Username, level),
-								Inline: true,
-							},
-							{
-								Name:  "⏱️ Duration",
-								Value: track.Duration,
-								Inline: true,
-							},
-							{
-								Name:  "💝 Love Points",
-								Value: fmt.Sprintf("%d", lovePoints),
-								Inline: true,
-							},
-						},
-						Color: 0xff69b4, // Pink color for romantic feel
-						Thumbnail: &discordgo.MessageEmbedThumbnail{
-							URL: track.Thumbnail,
-						},
+
+				// Set the requester
+				track.RequesterID = m.Author.ID
+				track.RequesterUsername = m.Author.Username
+
+				// Create or get the music queue for this guild
+				mutex.Lock()
+				guildCtx, exists := guildContexts[m.GuildID]
+				if !exists {
+					log.Printf("Creating new guild context for guild %s", m.GuildID)
+					guildCtx = &GuildContext{
+						MusicQueue: &MusicQueue{},
 					}
-					
-					// Create buttons for controls
-					components := []discordgo.MessageComponent{
-						discordgo.ActionsRow{
-							Components: []discordgo.MessageComponent{
-								discordgo.Button{
-									Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
-									Style: discordgo.PrimaryButton,
-									CustomID: "pause_resume_" + m.GuildID,
+					guildContexts[m.GuildID] = guildCtx
+				}
+
+				if guildCtx.MusicQueue == nil {
+					guildCtx.MusicQueue = &MusicQueue{}
+				}
+
+				// Check if the queue has reached the maximum size
+				if len(guildCtx.MusicQueue.Tracks) >= MaxQueueSize {
+					mutex.Unlock()
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Antrean sudah penuh! Maksimal %d lagu dalam antrean. Silakan tunggu hingga ada lagu yang selesai diputar.", MaxQueueSize))
+					return
+				}
+
+				guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
+				mutex.Unlock()
+
+				log.Printf("Added track '%s' to queue for guild %s", track.Title, m.GuildID)
+
+				// Check if bot is already in voice channel
+				vc, exists := s.VoiceConnections[m.GuildID]
+				if !exists || vc == nil {
+					// Auto-join voice channel if not already connected
+					log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
+					vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
+					if err != nil || vc == nil {
+						log.Printf("Error auto-joining voice channel: %v", err)
+
+						s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
+						return
+					}
+
+					// Wait for the connection to be ready
+					for !vc.Ready {
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+
+				// If nothing is currently playing, start playback
+				var tempGuildCtx *GuildContext
+				var tempExists bool
+				var hasTrack bool
+				mutex.RLock()
+				tempGuildCtx, tempExists = guildContexts[m.GuildID]
+				hasTrack = false
+				if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
+					hasTrack = true
+				}
+				mutex.RUnlock()
+
+				if !hasTrack {
+					log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
+					playNextTrack(s, m.GuildID, voiceState.ChannelID)
+
+					// Send enhanced now playing message with love points
+					statsMutex.RLock()
+					userStat, exists := userStats[m.Author.ID]
+					statsMutex.RUnlock()
+
+					level := 0
+					lovePoints := 0
+					if exists && userStat != nil {
+						level = userStat.Level
+						lovePoints = userStat.LovePoints
+					}
+
+					// Create a more detailed "Now Playing" message
+					nowPlayingMessage := fmt.Sprintf(
+						"🎵 **Now Playing:** `%s`\n"+
+						"👤 **Requested by:** %s **(Level %d)**\n"+
+						"⏱️ **Duration:** %s\n"+
+						"💝 **Love Points:** %d",
+						track.Title,
+						m.Author.Username,
+						level,
+						track.Duration,
+						lovePoints,
+					)
+
+					// Send the message with embed if thumbnail is available
+					if track.Thumbnail != "" {
+						embed := &discordgo.MessageEmbed{
+							Title:       "🎵 Now Playing",
+							URL:         track.URL,
+							Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
+							Fields: []*discordgo.MessageEmbedField{
+								{
+									Name:  "👤 Requested by",
+									Value: fmt.Sprintf("%s (Level %d)", m.Author.Username, level),
+									Inline: true,
 								},
-								discordgo.Button{
-									Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
-									Style: discordgo.PrimaryButton,
-									CustomID: "skip_" + m.GuildID,
+								{
+									Name:  "⏱️ Duration",
+									Value: track.Duration,
+									Inline: true,
 								},
-								discordgo.Button{
-									Emoji: discordgo.ComponentEmoji{Name: "🛑"},
-									Style: discordgo.DangerButton,
-									CustomID: "stop_" + m.GuildID,
-								},
-								discordgo.Button{
-									Emoji: discordgo.ComponentEmoji{Name: "🔁"},
-									Style: discordgo.SecondaryButton,
-									CustomID: "loop_" + m.GuildID,
+								{
+									Name:  "💝 Love Points",
+									Value: fmt.Sprintf("%d", lovePoints),
+									Inline: true,
 								},
 							},
-						},
+							Color: 0xff69b4, // Pink color for romantic feel
+							Thumbnail: &discordgo.MessageEmbedThumbnail{
+								URL: track.Thumbnail,
+							},
+						}
+
+						// Create buttons for controls
+						components := []discordgo.MessageComponent{
+							discordgo.ActionsRow{
+								Components: []discordgo.MessageComponent{
+									discordgo.Button{
+										Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+										Style: discordgo.PrimaryButton,
+										CustomID: "pause_resume_" + m.GuildID,
+									},
+									discordgo.Button{
+										Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+										Style: discordgo.PrimaryButton,
+										CustomID: "skip_" + m.GuildID,
+									},
+									discordgo.Button{
+										Emoji: discordgo.ComponentEmoji{Name: "🛑"},
+										Style: discordgo.DangerButton,
+										CustomID: "stop_" + m.GuildID,
+									},
+									discordgo.Button{
+										Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+										Style: discordgo.SecondaryButton,
+										CustomID: "loop_" + m.GuildID,
+									},
+								},
+							},
+						}
+
+						// Send the embed with buttons
+						s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+							Embeds:     []*discordgo.MessageEmbed{embed},
+							Components: components,
+						})
+					} else {
+						// Send simple message if no thumbnail
+						s.ChannelMessageSend(m.ChannelID, nowPlayingMessage)
 					}
-					
-					// Send the embed with buttons
-					s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-						Embeds:     []*discordgo.MessageEmbed{embed},
-						Components: components,
-					})
 				} else {
-					// Send simple message if no thumbnail
-					s.ChannelMessageSend(m.ChannelID, nowPlayingMessage)
+					// Send a message that the track was added to the queue
+					log.Printf("Track added to queue, currently playing another track in guild %s", m.GuildID)
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added `%s` to the queue.", track.Title))
 				}
-			} else {
-				// Send a message that the track was added to the queue
-				log.Printf("Track added to queue, currently playing another track in guild %s", m.GuildID)
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added `%s` to the queue.", track.Title))
-			}
-		}()
-	} else if strings.HasPrefix(lowerContent, "lyre") || strings.HasPrefix(lowerContent, "queen") {
-		// Handle other commands or just the name being called
-		parts := strings.Fields(m.Content)
-		if len(parts) < 2 {
-			// Just called the bot without a command
-			// Special response for the girlfriend (second user ID in the list)
-			allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
-			idParts := strings.Split(allowedUserIDs, ",")
-			girlfriendID := ""
-			if len(idParts) >= 2 {
-				girlfriendID = strings.TrimSpace(idParts[1]) // Assuming the second ID is the girlfriend's
-			}
-			
-			if m.Author.ID == girlfriendID {
-				s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Queen's Lɣre୨ৎ⭑ di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
-			} else {
-				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Queen's Lɣre୨ৎ⭑ siap memutar melodi untukmu! ୨ৎ⭑")
-			}
-			return
-		}
-		
-		// Handle text commands for the leveling system
-		command := strings.ToLower(parts[1])
-		switch command {
-		case "lovepoints":
-			handleLovePointsCommand(s, m)
-		case "couplestats":
-			handleCoupleStatsCommand(s, m)
-		case "loveprofile":
-			handleLoveProfileCommand(s, m)
-		case "help":
-			handleHelpCommand(s, m)
-		default:
+			}()
+		} else {
 			// Handle other commands or just the name being called
-			s.ChannelMessageSend(m.ChannelID, "Apa ada yang bisa aku bantu? Coba gunakan perintah seperti 'Lyre lovepoints' atau 'Queen couplestats'")
+			parts := strings.Fields(m.Content)
+			if len(parts) < 2 {
+				// Just called the bot without a command
+				// Special response for the girlfriend (second user ID in the list)
+				allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
+				idParts := strings.Split(allowedUserIDs, ",")
+				girlfriendID := ""
+				if len(idParts) >= 2 {
+					girlfriendID = strings.TrimSpace(idParts[1]) // Assuming the second ID is the girlfriend's
+				}
+
+				if m.Author.ID == girlfriendID {
+					s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Queen's Lɣre୨ৎ⭑ di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
+				} else {
+					s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Queen's Lɣre୨ৎ⭑ siap memutar melodi untukmu! ୨ৎ⭑")
+				}
+				return
+			}
+
+			// Handle text commands for the leveling system
+			command := strings.ToLower(parts[1])
+			switch command {
+			case "lovepoints":
+				handleLovePointsCommand(s, m)
+			case "couplestats":
+				handleCoupleStatsCommand(s, m)
+			case "loveprofile":
+				handleLoveProfileCommand(s, m)
+			case "volume":
+				handleVolumeCommand(s, m)
+			case "saveplaylist":
+				handleSavePlaylistCommand(s, m)
+			case "loadplaylist":
+				handleLoadPlaylistCommand(s, m)
+			case "help":
+				handleHelpCommand(s, m)
+			default:
+				// Handle other commands or just the name being called
+				s.ChannelMessageSend(m.ChannelID, "Apa ada yang bisa aku bantu? Coba gunakan perintah seperti 'Lyre lovepoints' atau 'Queen couplestats'")
+			}
 		}
 	}
 }
@@ -478,6 +619,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			handleQueueCommand(s, i)
 		case "oxide-nowplaying":
 			handleNowPlayingCommand(s, i)
+		case "oxide-volume":
+			handleSlashVolumeCommand(s, i)
+		case "oxide-saveplaylist":
+			handleSlashSavePlaylistCommand(s, i)
+		case "oxide-loadplaylist":
+			handleSlashLoadPlaylistCommand(s, i)
 		}
 	}
 	// Handle button interactions
@@ -489,7 +636,25 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // handlePlayCommand handles the play command
 func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	username := i.Member.User.Username
+	userID := i.Member.User.ID
 	log.Println("Perintah /play diterima dari: " + username)
+	
+	// Check rate limit
+	rateLimiter.AddRequest(userID)
+	if rateLimiter.IsLimited(userID) {
+		// Respond with rate limit exceeded message
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ Terlalu banyak permintaan! Harap tunggu sebentar sebelum meminta lagu lagi.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("Error responding with rate limit exceeded: %v", err)
+		}
+		return
+	}
 	
 	// Defer the response to prevent timeout - MUST BE DONE IN THE FIRST FEW MILLISECONDS
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -572,6 +737,18 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		guildCtx.MusicQueue = &MusicQueue{}
 	}
 
+	// Check if the queue has reached the maximum size
+	if len(guildCtx.MusicQueue.Tracks) >= MaxQueueSize {
+		mutex.Unlock()
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("❌ Antrean sudah penuh! Maksimal %d lagu dalam antrean. Silakan tunggu hingga ada lagu yang selesai diputar.", MaxQueueSize),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
 	guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
 	mutex.Unlock()
 
@@ -688,13 +865,15 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	mutex.Unlock()
 
 	// Stop the current audio stream before playing the next track
-	vc, err2 := s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
+	// We need to get the voice connection again to ensure we're working with the right one
+	vc, err2 := getConnectedVoiceConnection(s, i.GuildID)
 	if err2 != nil || vc == nil {
 		log.Printf("Error getting voice connection for skip: %v", err2)
 	} else {
-		// Stop the current audio stream
+		// Stop the current audio stream by closing the OpusSend channel
 		if vc.OpusSend != nil {
-			close(vc.OpusSend) // Close the OpusSend channel to stop the current stream
+			// Close the OpusSend channel to stop the current stream
+			close(vc.OpusSend)
 			vc.OpusSend = nil
 		}
 	}
@@ -934,6 +1113,158 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 }
 
+// handleSlashVolumeCommand handles the volume slash command
+func handleSlashVolumeCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		log.Printf("Error deferring interaction: %v", err)
+		return
+	}
+
+	// Get the volume level from options
+	volume := i.ApplicationCommandData().Options[0].IntValue()
+	
+	if volume < 0 || volume > 100 {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Volume harus antara 0-100.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	// Convert to 0.0-1.0 scale
+	volumeFloat := float64(volume) / 100.0
+	
+	prefs := getOrCreateUserPrefs(i.Member.User.ID)
+	prefs.Volume = volumeFloat
+	
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("🔊 Volume diatur ke %d%%", volume),
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
+}
+
+// handleSlashSavePlaylistCommand handles saving a track to a playlist via slash command
+func handleSlashSavePlaylistCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		log.Printf("Error deferring interaction: %v", err)
+		return
+	}
+
+	// Get the playlist name and track URL from options
+	playlistName := i.ApplicationCommandData().Options[0].StringValue()
+	trackURL := i.ApplicationCommandData().Options[1].StringValue()
+	
+	// Get track info
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	track, err := getYoutubeInfoWithContext(ctx, trackURL)
+	if err != nil {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Error getting track info: %v", err),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	prefs := getOrCreateUserPrefs(i.Member.User.ID)
+	
+	playlist, exists := prefs.SavedPlaylists[playlistName]
+	if !exists {
+		playlist = &SavedPlaylist{
+			Name: playlistName,
+			Tracks: make([]*Track, 0),
+		}
+		prefs.SavedPlaylists[playlistName] = playlist
+	}
+	
+	playlist.Tracks = append(playlist.Tracks, track)
+	
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("🎵 Lagu '%s' telah ditambahkan ke playlist '%s'", track.Title, playlistName),
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
+}
+
+// handleSlashLoadPlaylistCommand handles loading a playlist via slash command
+func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		log.Printf("Error deferring interaction: %v", err)
+		return
+	}
+
+	// Get the playlist name from options
+	playlistName := i.ApplicationCommandData().Options[0].StringValue()
+	
+	prefs := getOrCreateUserPrefs(i.Member.User.ID)
+	playlist, exists := prefs.SavedPlaylists[playlistName]
+	if !exists {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Playlist '%s' tidak ditemukan.", playlistName),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	// Add all tracks in the playlist to the music queue
+	mutex.Lock()
+	guildCtx, exists := guildContexts[i.GuildID]
+	if !exists {
+		guildCtx = &GuildContext{
+			MusicQueue: &MusicQueue{},
+		}
+		guildContexts[i.GuildID] = guildCtx
+	}
+	
+	if guildCtx.MusicQueue == nil {
+		guildCtx.MusicQueue = &MusicQueue{}
+	}
+	
+	// Check if the queue has space for all tracks
+	if len(guildCtx.MusicQueue.Tracks) + len(playlist.Tracks) > MaxQueueSize {
+		mutex.Unlock()
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("❌ Tidak cukup ruang dalam antrean! Maksimal %d lagu dalam antrean. Playlist memiliki %d lagu.", MaxQueueSize, len(playlist.Tracks)),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	// Add all tracks from the playlist to the queue
+	for _, track := range playlist.Tracks {
+		guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
+	}
+	mutex.Unlock()
+	
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("🎵 Playlist '%s' dengan %d lagu telah ditambahkan ke antrean.", playlistName, len(playlist.Tracks)),
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
+}
+
 // handleButtonInteraction handles button clicks
 func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	buttonID := i.MessageComponentData().CustomID
@@ -1161,7 +1492,7 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 func sanitizeURL(input string) string {
 	// Trim whitespace
 	input = strings.TrimSpace(input)
-	
+
 	// Handle shortened YouTube URLs (youtu.be)
 	if strings.HasPrefix(input, "youtu.be/") {
 		input = "https://" + input
@@ -1169,15 +1500,29 @@ func sanitizeURL(input string) string {
 		// Already a proper URL
 	} else if !strings.HasPrefix(input, "http://") && !strings.HasPrefix(input, "https://") {
 		// If it doesn't start with http/https, it might be a search query
-		// For search queries, we'll return as-is to be handled by yt-dlp
-		return input
+		// For search queries, validate that it contains only safe characters
+		// Allow letters, numbers, spaces, and common search characters
+		reg := regexp.MustCompile(`^[a-zA-Z0-9\s\-_.~:?#@!$&'()*+,;=%]+$`)
+		if reg.MatchString(input) {
+			return input
+		}
+		// If it doesn't match the safe pattern, return empty string
+		return ""
 	}
-	
-	// Only allow alphanumeric characters, hyphens, underscores, periods, slashes, colons, and question marks
-	reg := regexp.MustCompile(`[^a-zA-Z0-9\-_.~:/?#\[\]@!$&'()*+,;=%]+`)
-	sanitized := reg.ReplaceAllString(input, "")
-	
-	return sanitized
+
+	// Parse the URL to validate it's a proper URL
+	parsed, err := url.Parse(input)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+
+	// Only allow http and https schemes
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+
+	// Reconstruct the URL from the parsed components to ensure it's clean
+	return parsed.String()
 }
 
 // formatDuration formats duration in seconds to MM:SS or HH:MM:SS
@@ -1236,13 +1581,18 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	directURL := strings.TrimSpace(string(urlOutput))
 	log.Printf("playAudioStream: Got direct URL: %s", directURL)
 	
-	// Create the ffmpeg command with the direct URL
+	// Get user's volume preference
+	prefs := getOrCreateUserPrefs(requesterUsername)
+	volume := prefs.Volume
+	
+	// Create the ffmpeg command with the direct URL and volume adjustment
 	// Using exact args for Discord audio: -f s16le -ar 48000 -ac 2 pipe:1
 	cmd := exec.Command("ffmpeg", 
 		"-reconnect", "1", 
 		"-reconnect_streamed", "1", 
 		"-reconnect_delay_max", "5",
 		"-i", directURL, 
+		"-filter:a", fmt.Sprintf("volume=%.2f", volume), // Apply user's volume preference
 		"-f", "s16le", 
 		"-ar", "48000", 
 		"-ac", "2", 
@@ -1731,15 +2081,9 @@ connectionReady:
 		return // BERHENTI DI SINI, JANGAN LANJUT KE PLAYAUDIOSTREAM
 	}
 
-	// Verify that we have a valid track to play
-	if nextTrack == nil {
-		log.Printf("playNextTrack: Next track is nil for guild %s", guildID)
-		return
-	}
-
 	// Start playing the audio stream only if all conditions are met
-	if vc != nil && vc.Ready && nextTrack != nil {
-		go func() {
+	if vc != nil && vc.Ready {
+		go func(nextTrack *Track) { // Pass nextTrack as parameter to avoid closure issues
 			// Recover from panic in goroutine with stack trace
 			defer func() {
 				if r := recover(); r != nil {
@@ -1753,27 +2097,34 @@ connectionReady:
 			}()
 
 			playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
-		}()
+		}(nextTrack) // Pass nextTrack as argument to the goroutine
 	} else {
-		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v, nextTrack: %v", vc != nil, vc != nil && vc.Ready, nextTrack != nil)
+		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v", vc != nil, vc != nil && vc.Ready)
 	}
 }
 
 // Helper function to get connected voice connection
 func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discordgo.VoiceConnection, error) {
+	// First, try to get from our guild context
 	mutex.RLock()
 	guildCtx, exists := guildContexts[guildID]
-	mutex.RUnlock()
-
 	if exists && guildCtx != nil && guildCtx.VoiceConnection != nil {
-		return guildCtx.VoiceConnection, nil
+		vc := guildCtx.VoiceConnection
+		mutex.RUnlock()
+		
+		// Verify that the connection is still active
+		if vc != nil && vc.Ready {
+			return vc, nil
+		}
+	} else {
+		mutex.RUnlock()
 	}
 
 	// Fallback to session's voice connections if not in our context
 	if s.VoiceConnections != nil {
 		vc, exists := s.VoiceConnections[guildID]
-		if !exists || vc == nil {
-			return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
+		if !exists || vc == nil || !vc.Ready {
+			return nil, fmt.Errorf("no active voice connection found for guild %s", guildID)
 		}
 		return vc, nil
 	}
@@ -2063,6 +2414,136 @@ func getUserByUsernameID(s *discordgo.Session, userID string) string {
 	return user.Username
 }
 
+// getOrCreateUserPrefs gets or creates user preferences
+func getOrCreateUserPrefs(userID string) *UserPreferences {
+	prefsMutex.Lock()
+	defer prefsMutex.Unlock()
+	
+	prefs, exists := userPreferences[userID]
+	if !exists {
+		prefs = &UserPreferences{
+			Volume: 1.0, // Default volume at 100%
+			SavedPlaylists: make(map[string]*SavedPlaylist),
+		}
+		userPreferences[userID] = prefs
+	}
+	
+	return prefs
+}
+
+// handleVolumeCommand handles the volume command
+func handleVolumeCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	parts := strings.Fields(m.Content)
+	if len(parts) < 3 {
+		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre volume [0-100]' atau 'Queen volume [0-100]'")
+		return
+	}
+	
+	volumeStr := parts[2]
+	volume, err := strconv.ParseFloat(volumeStr, 64)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Silakan masukkan angka antara 0-100 untuk volume.")
+		return
+	}
+	
+	if volume < 0 || volume > 100 {
+		s.ChannelMessageSend(m.ChannelID, "Volume harus antara 0-100.")
+		return
+	}
+	
+	// Convert to 0.0-1.0 scale
+	volume /= 100.0
+	
+	prefs := getOrCreateUserPrefs(m.Author.ID)
+	prefs.Volume = volume
+	
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔊 Volume diatur ke %.0f%%", volume*100))
+}
+
+// handleSavePlaylistCommand handles saving a playlist
+func handleSavePlaylistCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	parts := strings.Fields(m.Content)
+	if len(parts) < 4 {
+		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre saveplaylist [nama] [url]' atau 'Queen saveplaylist [nama] [url]'")
+		return
+	}
+	
+	playlistName := parts[2]
+	trackURL := parts[3]
+	
+	// Get track info
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	track, err := getYoutubeInfoWithContext(ctx, trackURL)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+		return
+	}
+	
+	prefs := getOrCreateUserPrefs(m.Author.ID)
+	
+	playlist, exists := prefs.SavedPlaylists[playlistName]
+	if !exists {
+		playlist = &SavedPlaylist{
+			Name: playlistName,
+			Tracks: make([]*Track, 0),
+		}
+		prefs.SavedPlaylists[playlistName] = playlist
+	}
+	
+	playlist.Tracks = append(playlist.Tracks, track)
+	
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Lagu '%s' telah ditambahkan ke playlist '%s'", track.Title, playlistName))
+}
+
+// handleLoadPlaylistCommand handles loading a playlist
+func handleLoadPlaylistCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	parts := strings.Fields(m.Content)
+	if len(parts) < 3 {
+		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre loadplaylist [nama]' atau 'Queen loadplaylist [nama]'")
+		return
+	}
+	
+	playlistName := parts[2]
+	
+	prefs := getOrCreateUserPrefs(m.Author.ID)
+	playlist, exists := prefs.SavedPlaylists[playlistName]
+	if !exists {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Playlist '%s' tidak ditemukan.", playlistName))
+		return
+	}
+	
+	// Add all tracks in the playlist to the music queue
+	mutex.Lock()
+	guildCtx, exists := guildContexts[m.GuildID]
+	if !exists {
+		guildCtx = &GuildContext{
+			MusicQueue: &MusicQueue{},
+		}
+		guildContexts[m.GuildID] = guildCtx
+	}
+	
+	if guildCtx.MusicQueue == nil {
+		guildCtx.MusicQueue = &MusicQueue{}
+	}
+	
+	// Check if the queue has space for all tracks
+	if len(guildCtx.MusicQueue.Tracks) + len(playlist.Tracks) > MaxQueueSize {
+		mutex.Unlock()
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Tidak cukup ruang dalam antrean! Maksimal %d lagu dalam antrean. Playlist memiliki %d lagu.", MaxQueueSize, len(playlist.Tracks)))
+		return
+	}
+	
+	// Add all tracks from the playlist to the queue
+	for _, track := range playlist.Tracks {
+		guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
+	}
+	mutex.Unlock()
+	
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Playlist '%s' dengan %d lagu telah ditambahkan ke antrean.", playlistName, len(playlist.Tracks)))
+}
+
 // handleHelpCommand handles the help command
 func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	helpMessage := `
@@ -2070,6 +2551,9 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 🎵 **Musik Commands:**
 • "Lyre play [link/search]" atau "Queen play [link/search]" - Putar lagu dari YouTube
+• "Lyre volume [0-100]" atau "Queen volume [0-100]" - Atur volume (0-100%)
+• "Lyre saveplaylist [nama] [url]" atau "Queen saveplaylist [nama] [url]" - Simpan lagu ke playlist
+• "Lyre loadplaylist [nama]" atau "Queen loadplaylist [nama]" - Muat playlist ke antrean
 
 💝 **Love System Commands:**
 • "Lyre lovepoints" atau "Queen lovepoints" - Lihat poin cinta dan level kamu
