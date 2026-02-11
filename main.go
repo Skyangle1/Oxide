@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +30,14 @@ type GuildContext struct {
 	VoiceConnection *discordgo.VoiceConnection
 	MusicQueue      *MusicQueue
 	CurrentTrack    *Track
+	StartTime       time.Time  // Time when the current track started playing
+}
+
+// TrackWithDuration extends Track with duration information in seconds
+type TrackWithDuration struct {
+	*Track
+	DurationSeconds int // Duration in seconds
+	StartTime       time.Time // Time when this track started playing
 }
 
 
@@ -1296,6 +1305,146 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Set bit rate
 	enc.SetBitrate(128 * 1000) // 128kbps
 	
+	// Get the guild context to update the start time
+	mutex.Lock()
+	guildCtx, exists := guildContexts[guildID]
+	if !exists {
+		guildCtx = &GuildContext{
+			MusicQueue: &MusicQueue{},
+		}
+		guildContexts[guildID] = guildCtx
+	}
+	
+	if guildCtx != nil {
+		guildCtx.StartTime = time.Now()
+	}
+	mutex.Unlock()
+	
+	// Start a goroutine to update the "Now Playing" message with progress bar
+	progressUpdaterCtx, progressUpdaterCancel := context.WithCancel(context.Background())
+	defer progressUpdaterCancel()
+	
+	go func() {
+		// Recover from panic in goroutine
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Recovered from panic in progress updater goroutine: %v", r)
+				log.Printf("Stack trace:\n%s", debug.Stack())
+			}
+		}()
+		
+		ticker := time.NewTicker(5 * time.Second) // Update every 5 seconds
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				// Calculate elapsed time since track started
+				mutex.RLock()
+				guildCtx, exists := guildContexts[guildID]
+				if !exists || guildCtx == nil || guildCtx.StartTime.IsZero() {
+					mutex.RUnlock()
+					continue
+				}
+				elapsed := int(time.Since(guildCtx.StartTime).Seconds())
+				
+				// Get track duration
+				trackDuration := 0
+				if guildCtx.CurrentTrack != nil && guildCtx.CurrentTrack.Duration != "" {
+					parts := strings.Split(guildCtx.CurrentTrack.Duration, ":")
+					if len(parts) == 2 { // MM:SS
+						mins, _ := strconv.Atoi(parts[0])
+						secs, _ := strconv.Atoi(parts[1])
+						trackDuration = mins*60 + secs
+					} else if len(parts) == 3 { // HH:MM:SS
+						hours, _ := strconv.Atoi(parts[0])
+						mins, _ := strconv.Atoi(parts[1])
+						secs, _ := strconv.Atoi(parts[2])
+						trackDuration = hours*3600 + mins*60 + secs
+					}
+				}
+				mutex.RUnlock()
+				
+				// Create progress bar
+				progressBar := createProgressBar(elapsed, trackDuration)
+				
+				// Format time display
+				elapsedFormatted := formatTime(elapsed)
+				totalFormatted := formatTime(trackDuration)
+				
+				// Get the current track information
+				var currentTrackTitle, currentTrackUploader, currentTrackRequester, currentTrackThumbnail string
+				
+				mutex.RLock()
+				guildCtx, exists = guildContexts[guildID]
+				if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
+					currentTrack := guildCtx.CurrentTrack
+					currentTrackTitle = currentTrack.Title
+					currentTrackUploader = currentTrack.Uploader
+					currentTrackRequester = currentTrack.RequesterUsername
+					currentTrackThumbnail = currentTrack.Thumbnail
+				}
+				mutex.RUnlock()
+				
+				// Create embed with progress information
+				embed := &discordgo.MessageEmbed{
+					Title:       "🎵 Now Playing",
+					Description: fmt.Sprintf("[%s](%s)", currentTrackTitle, ""),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:  "⏱️ Progress",
+							Value: fmt.Sprintf("`%s / %s`\n%s", elapsedFormatted, totalFormatted, progressBar),
+							Inline: false,
+						},
+						{
+							Name:  "👤 Uploader",
+							Value: currentTrackUploader,
+							Inline: true,
+						},
+						{
+							Name:  "💝 Requested by",
+							Value: currentTrackRequester,
+							Inline: true,
+						},
+					},
+					Color: 0x00ff00, // Green color
+				}
+				
+				// Add thumbnail if available
+				if currentTrackThumbnail != "" {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: currentTrackThumbnail,
+					}
+				}
+				
+				// Get the guild to find a text channel to send the update
+				guild, err := session.State.Guild(guildID)
+				if err != nil {
+					continue
+				}
+				
+				// Find a text channel to send the progress update
+				var textChannelID string
+				for _, channel := range guild.Channels {
+					if channel.Type == discordgo.ChannelTypeGuildText {
+						textChannelID = channel.ID
+						break
+					}
+				}
+				
+				if textChannelID != "" {
+					_, err := session.ChannelMessageSendEmbed(textChannelID, embed)
+					if err != nil {
+						log.Printf("Error sending progress update: %v", err)
+					}
+				}
+			case <-progressUpdaterCtx.Done():
+				// Context cancelled, stop updating
+				return
+			}
+		}
+	}()
+	
 	// Send audio to Discord
 	if vc != nil {
 		vc.Speaking(true)
@@ -1430,6 +1579,9 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	
 	// Wait for process to finish
 	cmd.Wait()
+	
+	// The progressUpdaterCancel() is deferred earlier in the function
+	// It will be called automatically when the function exits
 }
 
 // playNextTrack plays the next track in the queue
@@ -1645,6 +1797,57 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 	}
 
 	return nil, fmt.Errorf("user not in a voice channel")
+}
+
+// createProgressBar creates a visual progress bar for the current track
+func createProgressBar(currentTime, totalTime int) string {
+	const barLength = 20
+	if totalTime <= 0 {
+		return strings.Repeat("▬", barLength) + " ▫▫▫▫▫"
+	}
+	
+	progress := int((float64(currentTime) / float64(totalTime)) * barLength)
+	if progress > barLength {
+		progress = barLength
+	}
+	
+	bar := strings.Repeat("▬", progress) + "🔘" + strings.Repeat("▬", barLength-progress)
+	
+	// Add time indicators at specific positions
+	indicatorPos := make([]string, barLength+1)
+	for i := range indicatorPos {
+		indicatorPos[i] = "▫"
+	}
+	
+	// Place time indicators at 25%, 50%, 75% positions
+	if barLength >= 4 {
+		indicatorPos[barLength/4] = "⏱️"
+		indicatorPos[barLength/2] = "💡"
+		indicatorPos[(3*barLength)/4] = "🔥"
+	}
+	
+	// Replace the indicator at progress position with a different symbol
+	if progress <= barLength && progress >= 0 {
+		indicatorPos[progress] = "✅"
+	}
+	
+	return bar + "\n" + strings.Join(indicatorPos, "")
+}
+
+// formatTime formats seconds to MM:SS or HH:MM:SS
+func formatTime(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	
+	hours := seconds / 3600
+	minutes := (seconds % 3600) / 60
+	secs := seconds % 60
+	
+	if hours > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, secs)
 }
 
 // updateUserStats updates user statistics when they send a message
