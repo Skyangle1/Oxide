@@ -1289,7 +1289,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 
 	// Lock mutex for thread-safe access to guild contexts
 	mutex.Lock()
-	
+
 	// Ensure guild context exists
 	guildCtx, exists := guildContexts[guildID]
 	if !exists {
@@ -1305,11 +1305,11 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}
 
 	queue := guildCtx.MusicQueue
-	
+
 	// Check if queue is empty
-	if len(queue.Tracks) == 0 {
+	if queue == nil || len(queue.Tracks) == 0 {
 		mutex.Unlock()
-		
+
 		// Queue is empty, disconnect from voice if no one else is listening
 		vc, err := getConnectedVoiceConnection(s, guildID)
 		if err != nil || vc == nil {
@@ -1323,10 +1323,12 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 			return
 		}
 
-		for _, vs := range guild.VoiceStates {
-			if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
-				// Someone else is still in the channel, don't disconnect
-				return
+		if guild != nil && guild.VoiceStates != nil {
+			for _, vs := range guild.VoiceStates {
+				if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
+					// Someone else is still in the channel, don't disconnect
+					return
+				}
 			}
 		}
 
@@ -1336,24 +1338,28 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}
 
 	// Get the next track
-	if len(queue.Tracks) == 0 {
+	if queue.Tracks == nil || len(queue.Tracks) == 0 {
 		log.Printf("playNextTrack: Queue is empty for guild %s", guildID)
 		mutex.Unlock()
 		return
 	}
 
 	nextTrack := queue.Tracks[0]
-	
+
 	// Check if nextTrack is nil before accessing its properties
 	if nextTrack == nil {
 		log.Printf("playNextTrack: Next track is nil for guild %s", guildID)
-		queue.Tracks = queue.Tracks[1:] // Remove the nil track from the queue
+		if len(queue.Tracks) > 0 {
+			queue.Tracks = queue.Tracks[1:] // Remove the nil track from the queue
+		}
 		mutex.Unlock()
 		return
 	}
 
 	// Remove the played track from the queue
-	queue.Tracks = queue.Tracks[1:]
+	if len(queue.Tracks) > 0 {
+		queue.Tracks = queue.Tracks[1:]
+	}
 
 	// Store the current track in the guild context
 	guildCtx.CurrentTrack = nextTrack
@@ -1445,17 +1451,21 @@ func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discord
 	mutex.RLock()
 	guildCtx, exists := guildContexts[guildID]
 	mutex.RUnlock()
-	
+
 	if exists && guildCtx != nil && guildCtx.VoiceConnection != nil {
 		return guildCtx.VoiceConnection, nil
 	}
-	
+
 	// Fallback to session's voice connections if not in our context
-	vc, exists := s.VoiceConnections[guildID]
-	if !exists || vc == nil {
-		return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
+	if s.VoiceConnections != nil {
+		vc, exists := s.VoiceConnections[guildID]
+		if !exists || vc == nil {
+			return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
+		}
+		return vc, nil
 	}
-	return vc, nil
+	
+	return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
 }
 
 // Helper function to get user's voice state
@@ -1465,9 +1475,11 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 		return nil, err
 	}
 
-	for _, vs := range guild.VoiceStates {
-		if vs.UserID == userID {
-			return vs, nil
+	if guild != nil && guild.VoiceStates != nil {
+		for _, vs := range guild.VoiceStates {
+			if vs != nil && vs.UserID == userID {
+				return vs, nil
+			}
 		}
 	}
 
