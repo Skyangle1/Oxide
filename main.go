@@ -295,7 +295,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			
 			if !hasTrack {
 				log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
-				playNextTrack(s, &discordgo.InteractionCreate{}, voiceState.ChannelID)
+				playNextTrack(s, m.GuildID, voiceState.ChannelID)
 
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Now playing: `%s`", track.Title))
 			} else {
@@ -479,7 +479,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	
 	if !hasTrack {
 		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
-		playNextTrack(s, i, voiceState.ChannelID)
+		playNextTrack(s, i.GuildID, voiceState.ChannelID)
 		
 		// Use follow-up message to respond after defer
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
@@ -552,7 +552,7 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	mutex.Unlock()
 
 	// Play the next track
-	playNextTrack(s, i, voiceState.ChannelID)
+	playNextTrack(s, i.GuildID, voiceState.ChannelID)
 	
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: "Skipped the current track.",
@@ -839,9 +839,7 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		mutex.Unlock()
 
 		// Play the next track
-		playNextTrack(s, &discordgo.InteractionCreate{
-			Interaction: i.Interaction,
-		}, voiceState.ChannelID)
+		playNextTrack(s, i.GuildID, voiceState.ChannelID)
 		
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
@@ -1169,7 +1167,31 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		
 		// Play the next track if available and connection still exists
 		if vc != nil {
-			playNextTrack(session, &discordgo.InteractionCreate{}, vc.ChannelID)
+			// We need to get the guildID from the voice connection or guild contexts
+			var guildID string
+			// Look through all voice connections to find which guild this channel belongs to
+			for gid, vconn := range session.VoiceConnections {
+				if vconn != nil && vconn.ChannelID == vc.ChannelID {
+					guildID = gid
+					break
+				}
+			}
+			
+			if guildID == "" {
+				// If we still can't determine the guildID, try to get it from the guild contexts
+				mutex.RLock()
+				for gid, ctx := range guildContexts {
+					if ctx.VoiceConnection != nil && ctx.VoiceConnection.ChannelID == vc.ChannelID {
+						guildID = gid
+						break
+					}
+				}
+				mutex.RUnlock()
+			}
+			
+			if guildID != "" {
+				playNextTrack(session, guildID, vc.ChannelID)
+			}
 		}
 	}()
 	
@@ -1261,7 +1283,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 }
 
 // playNextTrack plays the next track in the queue
-func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
+	// Guard clause: Check if guildID is empty
+	if guildID == "" {
+		log.Println("Error: guildID kosong, membatalkan playback.")
+		return
+	}
+	
 	// Recover from panic with stack trace
 	defer func() {
 		if r := recover(); r != nil {
@@ -1269,38 +1297,6 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 			log.Printf("Stack trace:\n%s", debug.Stack())
 		}
 	}()
-
-	var guildID string
-	if i != nil && i.GuildID != "" {
-		guildID = i.GuildID
-	} else if channelID != "" {
-		// If called from inside playAudioStream, we need to determine the guildID from the channelID
-		// Look through all voice connections to find which guild this channel belongs to
-		for gid, vc := range s.VoiceConnections {
-			if vc != nil && vc.ChannelID == channelID {
-				guildID = gid
-				break
-			}
-		}
-		
-		if guildID == "" {
-			// If we still can't determine the guildID, try to get it from the guild contexts
-			mutex.RLock()
-			for gid, ctx := range guildContexts {
-				if ctx.VoiceConnection != nil && ctx.VoiceConnection.ChannelID == channelID {
-					guildID = gid
-					break
-				}
-			}
-			mutex.RUnlock()
-		}
-	}
-
-	// Validate guildID
-	if guildID == "" {
-		log.Printf("playNextTrack: Cannot determine guildID from interaction or channelID")
-		return
-	}
 
 	// Lock mutex for thread-safe access to guild contexts
 	mutex.Lock()
@@ -1449,10 +1445,7 @@ connectionReady:
 					log.Printf("Stack trace:\n%s", debug.Stack())
 					// Try to play the next track if available
 					if vc != nil {
-						// Create a minimal interaction object with the guildID
-						tempInteraction := &discordgo.InteractionCreate{}
-						tempInteraction.GuildID = guildID
-						playNextTrack(s, tempInteraction, vc.ChannelID)
+						playNextTrack(s, guildID, vc.ChannelID)
 					}
 				}
 			}()
