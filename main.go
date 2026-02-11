@@ -1064,7 +1064,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	if vc != nil {
 		vc.Speaking(true)
 		// Add delay to allow Discord to prepare for audio
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 	}
 	
 	defer func() {
@@ -1135,18 +1135,23 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			// Wait for the next tick to maintain proper timing
 			<-ticker.C
 
-			// Send the encoded Opus frame to Discord
-			select {
-			case vc.OpusSend <- opusData:
-				log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
-				frameCounter++
-				
-				// Log successful frame every 100 frames
-				if frameCounter%100 == 0 {
-					log.Printf("playAudioStream: Successfully sent %d Opus frames to Discord", frameCounter)
+			// Strict nil check before sending the encoded Opus frame to Discord
+			if vc != nil && vc.OpusSend != nil {
+				select {
+				case vc.OpusSend <- opusData:
+					log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
+					frameCounter++
+
+					// Log successful frame every 100 frames
+					if frameCounter%100 == 0 {
+						log.Printf("playAudioStream: Successfully sent %d Opus frames to Discord", frameCounter)
+					}
+				case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
+					log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
 				}
-			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
-				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
+			} else {
+				log.Printf("playAudioStream: Voice connection or OpusSend is nil, stopping playback")
+				break
 			}
 		}
 	}
