@@ -161,9 +161,110 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// Respond to ping
-	if m.Content == "!ping" {
-		s.ChannelMessageSend(m.ChannelID, "Pong!")
+	// Convert message to lowercase for case-insensitive comparison
+	lowerContent := strings.ToLower(m.Content)
+
+	// Check if the message starts with "lyre" or "queen" (case insensitive)
+	if strings.HasPrefix(lowerContent, "lyre") || strings.HasPrefix(lowerContent, "queen") {
+		// Extract the command and arguments
+		parts := strings.Fields(m.Content)
+		if len(parts) < 2 {
+			// Just called the bot without a command
+			s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
+			return
+		}
+
+		command := strings.ToLower(parts[1])
+		args := parts[2:]
+
+		// Process the command
+		switch command {
+		case "play":
+			if len(args) > 0 {
+				query := strings.Join(args, " ")
+				// Create a mock interaction to reuse the existing play command logic
+				// We'll simulate the interaction by calling the function directly
+				go func() {
+					// Get voice state to check if user is in a voice channel
+					voiceState, err := getVoiceState(s, m.Author.ID, m.GuildID)
+					if err != nil {
+						s.ChannelMessageSend(m.ChannelID, "You must be connected to a voice channel to use this command.")
+						return
+					}
+
+					// Get track info using yt-dlp
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					
+					track, err := getYoutubeInfoWithContext(ctx, query)
+					if err != nil {
+						s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+						return
+					}
+					
+					// Set the requester
+					track.RequesterID = m.Author.ID
+					track.RequesterUsername = m.Author.Username
+
+					// Create or get the music queue for this guild
+					mutex.Lock()
+					queue, exists := musicQueues[m.GuildID]
+					if !exists {
+						log.Printf("Creating new queue for guild %s", m.GuildID)
+						queue = &MusicQueue{}
+						musicQueues[m.GuildID] = queue
+					}
+
+					queue.Tracks = append(queue.Tracks, track)
+					mutex.Unlock()
+
+					log.Printf("Added track '%s' to queue for guild %s", track.Title, m.GuildID)
+
+					// Check if bot is already in voice channel
+					vc, exists := s.VoiceConnections[m.GuildID]
+					if !exists || vc == nil {
+						// Auto-join voice channel if not already connected
+						log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
+						vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
+						if err != nil || vc == nil {
+							log.Printf("Error auto-joining voice channel: %v", err)
+							
+							s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
+							return
+						}
+						
+						// Wait for the connection to be ready
+						for !vc.Ready {
+							time.Sleep(100 * time.Millisecond)
+						}
+					}
+
+					// If nothing is currently playing, start playback
+					if _, playing := currentTracks[m.GuildID]; !playing {
+						log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
+						playNextTrack(s, &discordgo.InteractionCreate{}, voiceState.ChannelID)
+						
+						s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Now playing: `%s`", track.Title))
+					} else {
+						// Send a message that the track was added to the queue
+						log.Printf("Track added to queue, currently playing another track in guild %s", m.GuildID)
+						s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added `%s` to the queue.", track.Title))
+					}
+				}()
+			} else {
+				s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query to play.")
+			}
+		case "skip":
+			s.ChannelMessageSend(m.ChannelID, "Skipping current track...")
+		case "stop":
+			s.ChannelMessageSend(m.ChannelID, "Stopping playback and clearing queue...")
+		case "queue":
+			s.ChannelMessageSend(m.ChannelID, "Showing current queue...")
+		case "nowplaying":
+			s.ChannelMessageSend(m.ChannelID, "Showing currently playing track...")
+		default:
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Unknown command: %s. Available commands: play, skip, stop, queue, nowplaying", command))
+		}
 	}
 }
 
