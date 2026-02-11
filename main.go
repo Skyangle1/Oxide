@@ -523,22 +523,22 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 							discordgo.ActionsRow{
 								Components: []discordgo.MessageComponent{
 									discordgo.Button{
-										Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+										Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
 										Style: discordgo.PrimaryButton,
 										CustomID: "pause_resume_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+										Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
 										Style: discordgo.PrimaryButton,
 										CustomID: "skip_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: discordgo.ComponentEmoji{Name: "🛑"},
+										Emoji: &discordgo.ComponentEmoji{Name: "🛑"},
 										Style: discordgo.DangerButton,
 										CustomID: "stop_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+										Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
 										Style: discordgo.SecondaryButton,
 										CustomID: "loop_" + m.GuildID,
 									},
@@ -1086,22 +1086,22 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+					Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
 					Style: discordgo.PrimaryButton,
 					CustomID: "pause_resume_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+					Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
 					Style: discordgo.PrimaryButton,
 					CustomID: "skip_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏹️"},
+					Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
 					Style: discordgo.DangerButton,
 					CustomID: "stop_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+					Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
 					Style: discordgo.SecondaryButton,
 					CustomID: "loop_" + i.GuildID,
 				},
