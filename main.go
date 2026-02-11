@@ -1213,6 +1213,13 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		return
 	}
 
+	// Ensure queue is not empty before accessing tracks
+	if len(queue.Tracks) == 0 {
+		log.Printf("playNextTrack: Queue is empty for guild %s", guildID)
+		mutex.Unlock()
+		return
+	}
+
 	// Get the next track
 	nextTrack := queue.Tracks[0]
 	queue.Tracks = queue.Tracks[1:] // Remove the played track from the queue
@@ -1231,14 +1238,14 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	// Wait for the connection to be ready with timeout
 	readyTimeout := time.NewTimer(10 * time.Second)
 	defer readyTimeout.Stop()
-	
+
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
-			if vc.Ready {
+			if vc != nil && vc.Ready {
 				log.Printf("playNextTrack: Voice connection ready for guild %s", guildID)
 				goto connectionReady
 			}
@@ -1247,29 +1254,45 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 			return
 		}
 	}
-	
+
 connectionReady:
-	// Verify voice connection is still valid before starting playback
-	if vc == nil || !vc.Ready {
-		log.Printf("playNextTrack: Voice connection is not ready or nil for guild %s", guildID)
+	// Strict nil check before proceeding with audio streaming
+	if vc == nil {
+		log.Printf("playNextTrack: Voice connection is nil for guild %s", guildID)
+		return
+	}
+	
+	// Double-check that the connection is ready
+	if !vc.Ready {
+		log.Printf("playNextTrack: Voice connection is not ready for guild %s", guildID)
 		return
 	}
 
-	// Start playing the audio stream
-	go func() {
-		// Recover from panic in goroutine
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Recovered from panic in playAudioStream goroutine: %v", r)
-				// Try to play the next track if available
-				if vc != nil {
-					playNextTrack(s, &discordgo.InteractionCreate{}, vc.ChannelID)
+	// Verify that we have a valid track to play
+	if nextTrack == nil {
+		log.Printf("playNextTrack: Next track is nil for guild %s", guildID)
+		return
+	}
+
+	// Start playing the audio stream only if all conditions are met
+	if vc != nil && vc.Ready && nextTrack != nil {
+		go func() {
+			// Recover from panic in goroutine
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Recovered from panic in playAudioStream goroutine: %v", r)
+					// Try to play the next track if available
+					if vc != nil {
+						playNextTrack(s, &discordgo.InteractionCreate{}, vc.ChannelID)
+					}
 				}
-			}
+			}()
+			
+			playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
 		}()
-		
-		playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
-	}()
+	} else {
+		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v, nextTrack: %v", vc != nil, vc != nil && vc.Ready, nextTrack != nil)
+	}
 }
 
 // Helper function to get user's voice state
