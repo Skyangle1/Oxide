@@ -1549,7 +1549,7 @@ func formatDuration(seconds float64) string {
 }
 
 // playAudioStream plays audio from a URL using yt-dlp and ffmpeg
-func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, requesterUsername string) {
+func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, requesterUsername string) error {
 	// Recover from panic
 	defer func() {
 		if r := recover(); r != nil {
@@ -1948,6 +1948,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	
 	// The progressUpdaterCancel() is deferred earlier in the function
 	// It will be called automatically when the function exits
+	return nil
 }
 
 // playNextTrack plays the next track in the queue
@@ -2136,7 +2137,7 @@ connectionReady:
 	if vc != nil && vc.Ready {
 		// Set log level to debug to see encryption details
 		vc.LogLevel = discordgo.LogDebug
-		
+
 		go func(nextTrack *Track) { // Pass nextTrack as parameter to avoid closure issues
 			// Recover from panic in goroutine with stack trace
 			defer func() {
@@ -2150,7 +2151,60 @@ connectionReady:
 				}
 			}()
 
-			playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+			// Retry mechanism for handling 4016 errors
+			maxRetries := 3
+			retryCount := 0
+			for retryCount < maxRetries {
+				err := playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+				if err == nil {
+					// Success, break out of retry loop
+					break
+				}
+				
+				// Check if the error is related to encryption mode
+				if strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") {
+					log.Printf("Encryption error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+					retryCount++
+					
+					// Disconnect and reconnect
+					vc.Disconnect()
+					time.Sleep(1 * time.Second)
+					
+					// Rejoin voice channel
+					newVc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
+					if err != nil || newVc == nil {
+						log.Printf("Failed to rejoin voice channel: %v", err)
+						break
+					}
+					
+					// Update the voice connection in the guild context
+					mutex.Lock()
+					guildCtx.VoiceConnection = newVc
+					mutex.Unlock()
+					
+					// Set log level to debug to see encryption details
+					newVc.LogLevel = discordgo.LogDebug
+					
+					// Wait for the connection to be ready
+					for i := 0; i < 50 && !newVc.Ready; i++ {
+						time.Sleep(100 * time.Millisecond)
+					}
+					
+					// Update vc reference for the next iteration
+					vc = newVc
+					
+					// Wait a bit before retrying
+					time.Sleep(2 * time.Second)
+				} else {
+					// Different error, don't retry
+					log.Printf("Non-encryption error in playAudioStream: %v", err)
+					break
+				}
+			}
+			
+			if retryCount >= maxRetries {
+				log.Printf("Failed to play audio after %d retries due to encryption errors", maxRetries)
+			}
 		}(nextTrack) // Pass nextTrack as argument to the goroutine
 	} else {
 		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v", vc != nil, vc != nil && vc.Ready)
