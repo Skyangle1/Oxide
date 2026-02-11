@@ -1289,15 +1289,27 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 
 	// Lock mutex for thread-safe access to guild contexts
 	mutex.Lock()
+	
+	// Ensure guild context exists
 	guildCtx, exists := guildContexts[guildID]
 	if !exists {
-		guildCtx = &GuildContext{}
+		guildCtx = &GuildContext{
+			MusicQueue: &MusicQueue{},
+		}
 		guildContexts[guildID] = guildCtx
 	}
-	
+
+	// Ensure MusicQueue is initialized
+	if guildCtx.MusicQueue == nil {
+		guildCtx.MusicQueue = &MusicQueue{}
+	}
+
 	queue := guildCtx.MusicQueue
-	if queue == nil || len(queue.Tracks) == 0 {
+	
+	// Check if queue is empty
+	if len(queue.Tracks) == 0 {
 		mutex.Unlock()
+		
 		// Queue is empty, disconnect from voice if no one else is listening
 		vc, err := getConnectedVoiceConnection(s, guildID)
 		if err != nil || vc == nil {
@@ -1323,16 +1335,25 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		return
 	}
 
-	// Ensure queue is not empty before accessing tracks
+	// Get the next track
 	if len(queue.Tracks) == 0 {
 		log.Printf("playNextTrack: Queue is empty for guild %s", guildID)
 		mutex.Unlock()
 		return
 	}
 
-	// Get the next track
 	nextTrack := queue.Tracks[0]
-	queue.Tracks = queue.Tracks[1:] // Remove the played track from the queue
+	
+	// Check if nextTrack is nil before accessing its properties
+	if nextTrack == nil {
+		log.Printf("playNextTrack: Next track is nil for guild %s", guildID)
+		queue.Tracks = queue.Tracks[1:] // Remove the nil track from the queue
+		mutex.Unlock()
+		return
+	}
+
+	// Remove the played track from the queue
+	queue.Tracks = queue.Tracks[1:]
 
 	// Store the current track in the guild context
 	guildCtx.CurrentTrack = nextTrack
@@ -1379,12 +1400,12 @@ connectionReady:
 		log.Println("KRITIS: voiceConnection masih nil! Mencoba menyambung ulang...")
 		return
 	}
-	
+
 	// Double-check the voice connection from the guild context
 	mutex.RLock()
 	contextVC := guildCtx.VoiceConnection
 	mutex.RUnlock()
-	
+
 	// Guard clause for nil voice connection
 	if contextVC == nil {
 		log.Println("Koneksi Voice NULL di playNextTrack, mencoba rekoneksi...")
