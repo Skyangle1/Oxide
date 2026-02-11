@@ -1354,9 +1354,21 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 // handleButtonInteraction handles button clicks
 func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	buttonID := i.MessageComponentData().CustomID
-	
+
 	// Extract guild ID from button ID
-	guildID := strings.Split(buttonID, "_")[1]
+	parts := strings.Split(buttonID, "_")
+	if len(parts) < 2 {
+		log.Printf("handleButtonInteraction: Invalid button ID format: %s", buttonID)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Invalid button format.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	guildID := parts[1]
 	
 	// Check if the user is in the same voice channel as the bot
 	voiceState, err := getVoiceState(s, i.Member.User.ID, guildID)
