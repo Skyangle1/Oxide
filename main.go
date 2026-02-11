@@ -1275,7 +1275,9 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		guildID = i.GuildID
 	} else {
 		// If called from inside playAudioStream, we need to determine the guildID differently
-		// This is a simplified approach - in practice, you'd need to track this differently
+		// We'll need to get the guildID from the voice connection or another source
+		// For now, we'll return since we can't determine the guild without interaction
+		log.Println("Peringatan: Interaction 'i' nil di playNextTrack. Tidak bisa menentukan guildID.")
 		return
 	}
 
