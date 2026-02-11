@@ -1271,19 +1271,34 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}()
 
 	var guildID string
-	if i != nil {
+	if i != nil && i.GuildID != "" {
 		guildID = i.GuildID
-	} else {
-		// If called from inside playAudioStream, we need to determine the guildID differently
-		// We'll need to get the guildID from the voice connection or another source
-		// For now, we'll return since we can't determine the guild without interaction
-		log.Println("Peringatan: Interaction 'i' nil di playNextTrack. Tidak bisa menentukan guildID.")
-		return
+	} else if channelID != "" {
+		// If called from inside playAudioStream, we need to determine the guildID from the channelID
+		// Look through all voice connections to find which guild this channel belongs to
+		for gid, vc := range s.VoiceConnections {
+			if vc != nil && vc.ChannelID == channelID {
+				guildID = gid
+				break
+			}
+		}
+		
+		if guildID == "" {
+			// If we still can't determine the guildID, try to get it from the guild contexts
+			mutex.RLock()
+			for gid, ctx := range guildContexts {
+				if ctx.VoiceConnection != nil && ctx.VoiceConnection.ChannelID == channelID {
+					guildID = gid
+					break
+				}
+			}
+			mutex.RUnlock()
+		}
 	}
 
 	// Validate guildID
 	if guildID == "" {
-		log.Printf("playNextTrack: Invalid guildID provided")
+		log.Printf("playNextTrack: Cannot determine guildID from interaction or channelID")
 		return
 	}
 
@@ -1337,8 +1352,8 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		return
 	}
 
-	// Get the next track
-	if queue.Tracks == nil || len(queue.Tracks) == 0 {
+	// Get the next track - using len() is safe even if Tracks is nil (returns 0)
+	if len(queue.Tracks) == 0 {
 		log.Printf("playNextTrack: Queue is empty for guild %s", guildID)
 		mutex.Unlock()
 		return
@@ -1434,7 +1449,10 @@ connectionReady:
 					log.Printf("Stack trace:\n%s", debug.Stack())
 					// Try to play the next track if available
 					if vc != nil {
-						playNextTrack(s, &discordgo.InteractionCreate{}, vc.ChannelID)
+						// Create a minimal interaction object with the guildID
+						tempInteraction := &discordgo.InteractionCreate{}
+						tempInteraction.GuildID = guildID
+						playNextTrack(s, tempInteraction, vc.ChannelID)
 					}
 				}
 			}()
