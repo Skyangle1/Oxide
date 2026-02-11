@@ -132,7 +132,7 @@ func main() {
 		log.Fatal("Error opening Discord connection: ", err)
 	}
 
-	fmt.Println("Oxide Music Bot is now running. Press CTRL+C to exit.")
+	fmt.Println("Queen's Lɣre୨ৎ⭑ is now running. Press CTRL+C to exit.")
 	
 	// Register slash commands
 	registerCommands(appID)
@@ -427,9 +427,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			}
 			
 			if m.Author.ID == girlfriendID {
-				s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Aku di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
+				s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Queen's Lɣre୨ৎ⭑ di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
 			} else {
-				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
+				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Queen's Lɣre୨ৎ⭑ siap memutar melodi untukmu! ୨ৎ⭑")
 			}
 			return
 		}
@@ -1848,7 +1848,7 @@ func getUserByUsernameID(s *discordgo.Session, userID string) string {
 // handleHelpCommand handles the help command
 func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	helpMessage := `
-💖 **OXIDE MUSIC BOT - HELP** 💖
+💖 **QUEEN'S LƔRE - HELP** 💖
 
 🎵 **Musik Commands:**
 • "Lyre play [link/search]" atau "Queen play [link/search]" - Putar lagu dari YouTube
@@ -1870,7 +1870,7 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 • Semakin sering berinteraksi, semakin tinggi level kamu!
 • Kamu dan pasanganmu membentuk tim yang hebat! 💕
 
-Selamat menikmati musik dan membangun hubungan kalian! 🎶
+Selamat menikmati musik dengan Queen's Lɣre୨ৎ⭑! 🎶
 	`
 	
 	s.ChannelMessageSend(m.ChannelID, helpMessage)
