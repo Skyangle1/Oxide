@@ -2137,7 +2137,29 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	if queue == nil || len(queue.Tracks) == 0 {
 		mutex.Unlock()
 
-		// Queue is empty, but we keep the connection alive even if no one else is in the channel
+		// Queue is empty, disconnect from voice if no one else is listening
+		vc, err := getConnectedVoiceConnection(s, guildID)
+		if err != nil || vc == nil {
+			return
+		}
+
+		// Check if anyone else is in the voice channel
+		guild, err := s.State.Guild(guildID)
+		if err != nil {
+			vc.Disconnect()
+			return
+		}
+
+		if guild != nil && guild.VoiceStates != nil {
+			for _, vs := range guild.VoiceStates {
+				if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
+					// Someone else is still in the channel, don't disconnect
+					return
+				}
+			}
+		}
+
+		// No one else is in the channel, but we keep the connection alive to maintain the room
 		// This keeps the bot in the voice channel to maintain the room
 		// We don't disconnect even if no one else is in the voice channel
 		return
