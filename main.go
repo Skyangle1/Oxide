@@ -987,18 +987,6 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		}
 		mutex.Unlock()
 
-		// Stop the current audio stream before playing the next track
-		vc, err2 := s.ChannelVoiceJoin(guildID, voiceState.ChannelID, false, true)
-		if err2 != nil || vc == nil {
-			log.Printf("Error getting voice connection for skip button: %v", err2)
-		} else {
-			// Stop the current audio stream
-			if vc.OpusSend != nil {
-				close(vc.OpusSend) // Close the OpusSend channel to stop the current stream
-				vc.OpusSend = nil
-			}
-		}
-
 		// Play the next track
 		playNextTrack(s, guildID, voiceState.ChannelID)
 		
