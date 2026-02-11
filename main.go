@@ -1120,35 +1120,40 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				// Correctly convert little-endian bytes to int16
 				pcmBuf[i] = int16(audioBytes[i*2]) | int16(audioBytes[i*2+1])<<8
 			}
-			
+
 			// Encode to Opus
 			opusData, err := enc.Encode(pcmBuf[:n/2], 960, 4000) // 960 samples per channel, max 4000 bytes
 			if err != nil {
 				log.Printf("playAudioStream: Error encoding to Opus: %v", err)
 				continue
 			}
-			
+
 			// Check the size of the encoded data
 			log.Printf("Encoded Opus data size: %d bytes", len(opusData))
-			
+
 			// Wait for the next tick to maintain proper timing
 			<-ticker.C
-			
+
 			// Send the encoded Opus frame to Discord
 			select {
 			case vc.OpusSend <- opusData:
-				log.Printf("Sent %d bytes to Discord as Opus", len(opusData))
+				log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
 				frameCounter++
+				
+				// Log successful frame every 100 frames
+				if frameCounter%100 == 0 {
+					log.Printf("playAudioStream: Successfully sent %d Opus frames to Discord", frameCounter)
+				}
 			case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
 				log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
 			}
 		}
 	}
-	
+
 	log.Printf("playAudioStream: Sent %d audio frames", frameCounter)
-	
+
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
-	
+
 	// Kill the process if still running
 	if cmd.Process != nil {
 		cmd.Process.Kill()
