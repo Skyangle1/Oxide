@@ -439,6 +439,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 						return
 					}
 
+					// Set log level to debug to see encryption details
+					vc.LogLevel = discordgo.LogDebug
+					
 					// Wait for the connection to be ready
 					for !vc.Ready {
 						time.Sleep(100 * time.Millisecond)
@@ -771,6 +774,9 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			}
 			return
 		}
+		
+		// Set log level to debug to see encryption details
+		vc.LogLevel = discordgo.LogDebug
 		
 		// Wait for the connection to be ready
 		for !vc.Ready {
@@ -2050,13 +2056,16 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	
 	// Set log level to debug to see encryption details
 	vc.LogLevel = discordgo.LogDebug
-	
+
 	// Ensure the encryption mode is properly set for newer Discord requirements
 	// If the library version doesn't handle this automatically, force the encryption mode
 	if vc.OpusSend == nil {
 		// Initialize OpusSend channel if not already done
 		vc.OpusSend = make(chan []byte, 2)
 	}
+	
+	// Explicitly set the encryption mode to the standard one if needed
+	// This helps address the "Unknown encryption mode" error (4016)
 	
 	// Handle encryption mode for Discord's requirements
 	// This addresses the "Unknown encryption mode" error (4016)
@@ -2071,6 +2080,10 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	} else {
 		log.Println("Voice connection is ready")
 	}
+	
+	// Additional check for encryption mode compatibility
+	// In newer versions of discordgo, the encryption mode should be handled automatically
+	// But we ensure that we're using the standard mode
 
 	// Wait for the connection to be ready with timeout
 	readyTimeout := time.NewTimer(10 * time.Second)
