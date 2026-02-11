@@ -38,6 +38,12 @@ var (
 	
 	// Mutex for thread-safe operations
 	mutex sync.RWMutex
+	
+	// Allowed users for exclusive access
+	AllowedUsers = map[string]bool{
+		"MASUKKAN_ID_DISCORD_LU_DI_SINI": true,
+		"MASUKKAN_ID_DISCORD_PACAR_LU_DI_SINI": true,
+	}
 )
 
 // Track represents a music track
@@ -161,6 +167,11 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	// Check if the message author is in the allowed users list
+	if !AllowedUsers[m.Author.ID] {
+		return
+	}
+
 	// Convert message to lowercase for case-insensitive comparison
 	lowerContent := strings.ToLower(m.Content)
 
@@ -170,7 +181,12 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		parts := strings.Fields(m.Content)
 		if len(parts) < 2 {
 			// Just called the bot without a command
-			s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
+			// Special response for the girlfriend
+			if m.Author.ID == "MASUKKAN_ID_DISCORD_PACAR_LU_DI_SINI" {
+				s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Aku di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
+			} else {
+				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
+			}
 			return
 		}
 
