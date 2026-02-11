@@ -1371,11 +1371,22 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 connectionReady:
 	// Add forced delay to ensure connection stability
 	time.Sleep(2 * time.Second)
-	
+
 	// CRITICAL: Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
 		log.Println("KRITIS: voiceConnection masih nil! Mencoba menyambung ulang...")
-		return 
+		return
+	}
+	
+	// Double-check the voice connection from the guild context
+	mutex.RLock()
+	contextVC := guildCtx.VoiceConnection
+	mutex.RUnlock()
+	
+	// Guard clause for nil voice connection
+	if contextVC == nil {
+		log.Println("Koneksi Voice NULL di playNextTrack, mencoba rekoneksi...")
+		return // BERHENTI DI SINI, JANGAN LANJUT KE PLAYAUDIOSTREAM
 	}
 
 	// Verify that we have a valid track to play
