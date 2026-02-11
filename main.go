@@ -434,9 +434,26 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
 					if err != nil || vc == nil {
 						log.Printf("Error auto-joining voice channel: %v", err)
-
-						s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
-						return
+						
+						// Check if the error is related to encryption mode
+						if err != nil && strings.Contains(err.Error(), "4016") {
+							log.Printf("Detected encryption mode error (4016), attempting reconnection...")
+							
+							// Wait a bit before retrying
+							time.Sleep(2 * time.Second)
+							
+							// Try to join again
+							vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
+							if err != nil || vc == nil {
+								log.Printf("Second attempt to join voice channel failed: %v", err)
+								
+								s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel (error 4016). Coba lagi nanti!")
+								return
+							}
+						} else {
+							s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
+							return
+						}
 					}
 
 					// Set log level to debug to see encryption details
@@ -765,14 +782,36 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
 		if err != nil || vc == nil {
 			log.Printf("Error auto-joining voice channel: %v", err)
-			
-			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-				Content: "❌ Gagal join voice channel. Coba lagi nanti!",
-			})
-			if err != nil {
-				log.Printf("Error sending follow-up message: %v", err)
+
+			// Check if the error is related to encryption mode
+			if err != nil && strings.Contains(err.Error(), "4016") {
+				log.Printf("Detected encryption mode error (4016), attempting reconnection...")
+				
+				// Wait a bit before retrying
+				time.Sleep(2 * time.Second)
+				
+				// Try to join again
+				vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
+				if err != nil || vc == nil {
+					log.Printf("Second attempt to join voice channel failed: %v", err)
+
+					_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+						Content: "❌ Gagal join voice channel (error 4016). Coba lagi nanti!",
+					})
+					if err != nil {
+						log.Printf("Error sending follow-up message: %v", err)
+					}
+					return
+				}
+			} else {
+				_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+					Content: "❌ Gagal join voice channel. Coba lagi nanti!",
+				})
+				if err != nil {
+					log.Printf("Error sending follow-up message: %v", err)
+				}
+				return
 			}
-			return
 		}
 		
 		// Set log level to debug to see encryption details
@@ -2049,7 +2088,24 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 	if err != nil || vc == nil {
 		log.Printf("playNextTrack: Error joining voice channel: %v", err)
-		return
+		
+		// Check if the error is related to encryption mode
+		if err != nil && strings.Contains(err.Error(), "4016") {
+			log.Printf("Detected encryption mode error (4016), attempting reconnection...")
+			
+			// Wait a bit before retrying
+			time.Sleep(2 * time.Second)
+			
+			// Try to join again
+			vc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
+			if err != nil || vc == nil {
+				log.Printf("playNextTrack: Second attempt to join voice channel failed: %v", err)
+				return
+			}
+		} else {
+			log.Printf("playNextTrack: Error joining voice channel: %v", err)
+			return
+		}
 	}
 
 	// Store the voice connection in the guild context
@@ -2174,6 +2230,13 @@ connectionReady:
 					newVc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 					if err != nil || newVc == nil {
 						log.Printf("Failed to rejoin voice channel: %v", err)
+						
+						// Check if the error is related to encryption mode
+						if err != nil && strings.Contains(err.Error(), "4016") {
+							log.Printf("Detected encryption mode error (4016) during rejoin, waiting before next attempt...")
+							// Wait before next retry
+							time.Sleep(2 * time.Second)
+						}
 						break
 					}
 					
