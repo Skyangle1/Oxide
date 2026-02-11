@@ -1246,6 +1246,15 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		return
 	}
 
+	// Safety First approach: Use local variable and layered nil checks
+	localVC := vc
+	
+	// Layered nil check before proceeding
+	if localVC == nil {
+		log.Println("Voice connection is nil, cancelling playback.")
+		return
+	}
+	
 	// Wait for the connection to be ready with timeout
 	readyTimeout := time.NewTimer(10 * time.Second)
 	defer readyTimeout.Stop()
@@ -1256,7 +1265,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	for {
 		select {
 		case <-ticker.C:
-			if vc != nil && vc.Ready {
+			if localVC != nil && localVC.Ready {
 				log.Printf("playNextTrack: Voice connection ready for guild %s", guildID)
 				goto connectionReady
 			}
@@ -1270,9 +1279,14 @@ connectionReady:
 	// Additional delay to ensure connection stability
 	time.Sleep(500 * time.Millisecond)
 	
-	// Strict nil check before proceeding with audio streaming
-	if vc == nil || !vc.Ready {
-		log.Println("Error: Voice connection is nil or not ready")
+	// Wait for status ready with retry logic
+	for i := 0; i < 10 && localVC != nil && !localVC.Ready; i++ {
+		time.Sleep(200 * time.Millisecond)
+	}
+	
+	// Final safety check after waiting for ready state
+	if localVC == nil || !localVC.Ready {
+		log.Println("Voice connection not ready after waiting, cancelling playback.")
 		return
 	}
 
@@ -1283,7 +1297,7 @@ connectionReady:
 	}
 
 	// Start playing the audio stream only if all conditions are met
-	if vc != nil && vc.Ready && nextTrack != nil {
+	if localVC != nil && localVC.Ready && nextTrack != nil {
 		go func() {
 			// Recover from panic in goroutine with stack trace
 			defer func() {
@@ -1291,16 +1305,16 @@ connectionReady:
 					log.Printf("Recovered from panic in playAudioStream goroutine: %v", r)
 					log.Printf("Stack trace:\n%s", debug.Stack())
 					// Try to play the next track if available
-					if vc != nil {
-						playNextTrack(s, &discordgo.InteractionCreate{}, vc.ChannelID)
+					if localVC != nil {
+						playNextTrack(s, &discordgo.InteractionCreate{}, localVC.ChannelID)
 					}
 				}
 			}()
-			
-			playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+
+			playAudioStream(localVC, nextTrack.URL, guildID, nextTrack.RequesterUsername)
 		}()
 	} else {
-		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v, nextTrack: %v", vc != nil, vc != nil && vc.Ready, nextTrack != nil)
+		log.Printf("playNextTrack: Conditions not met for playback - localVC: %v, localVC.Ready: %v, nextTrack: %v", localVC != nil, localVC != nil && localVC.Ready, nextTrack != nil)
 	}
 }
 
