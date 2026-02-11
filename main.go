@@ -1203,9 +1203,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		// Check if anyone else is in the voice channel
 		guild, err := s.State.Guild(guildID)
 		if err != nil {
-			if vc != nil {
-				vc.Disconnect()
-			}
+			vc.Disconnect()
 			return
 		}
 
@@ -1217,9 +1215,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		}
 
 		// No one else is in the channel, disconnect
-		if vc != nil {
-			vc.Disconnect()
-		}
+		vc.Disconnect()
 		return
 	}
 
