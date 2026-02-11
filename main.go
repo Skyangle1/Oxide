@@ -911,21 +911,38 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	// Stop the current audio stream before playing the next track
 	// We need to get the voice connection again to ensure we're working with the right one
-	vc, err2 := getConnectedVoiceConnection(s, i.GuildID)
-	if err2 != nil || vc == nil {
+	currentVc, err2 := getConnectedVoiceConnection(s, i.GuildID)
+	if err2 != nil || currentVc == nil {
 		log.Printf("Error getting voice connection for skip: %v", err2)
 	} else {
 		// Stop the current audio stream by closing the OpusSend channel
-		if vc.OpusSend != nil {
+		if currentVc.OpusSend != nil {
+			// Create a temporary channel to drain any remaining data
+			go func() {
+				// Drain the OpusSend channel to prevent blocking
+				for {
+					select {
+					case _, ok := <-currentVc.OpusSend:
+						if !ok {
+							// Channel closed, exit goroutine
+							return
+						}
+					case <-time.After(100 * time.Millisecond):
+						// Timeout, exit goroutine
+						return
+					}
+				}
+			}()
+			
 			// Close the OpusSend channel to stop the current stream
-			close(vc.OpusSend)
-			vc.OpusSend = nil
+			close(currentVc.OpusSend)
+			currentVc.OpusSend = nil
 		}
 	}
 
 	// Play the next track
 	playNextTrack(s, i.GuildID, voiceState.ChannelID)
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: "Skipped the current track.",
 	})
@@ -997,8 +1014,32 @@ func handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	mutex.Unlock()
 
+	// Stop the current audio stream by closing the OpusSend channel
+	if vc.OpusSend != nil {
+		// Create a temporary channel to drain any remaining data
+		go func() {
+			// Drain the OpusSend channel to prevent blocking
+			for {
+				select {
+				case _, ok := <-vc.OpusSend:
+					if !ok {
+						// Channel closed, exit goroutine
+						return
+					}
+				case <-time.After(100 * time.Millisecond):
+					// Timeout, exit goroutine
+					return
+				}
+			}
+		}()
+		
+		// Close the OpusSend channel to stop the current stream
+		close(vc.OpusSend)
+		vc.OpusSend = nil
+	}
+
 	vc.Disconnect()
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: "Stopped playback and cleared the queue.",
 	})
@@ -1372,9 +1413,40 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		}
 		mutex.Unlock()
 
+		// Stop the current audio stream before playing the next track
+		// We need to get the voice connection again to ensure we're working with the right one
+		currentVc, err2 := getConnectedVoiceConnection(s, guildID)
+		if err2 != nil || currentVc == nil {
+			log.Printf("Error getting voice connection for skip button: %v", err2)
+		} else {
+			// Stop the current audio stream by closing the OpusSend channel
+			if currentVc.OpusSend != nil {
+				// Create a temporary channel to drain any remaining data
+				go func() {
+					// Drain the OpusSend channel to prevent blocking
+					for {
+						select {
+						case _, ok := <-currentVc.OpusSend:
+							if !ok {
+								// Channel closed, exit goroutine
+								return
+							}
+						case <-time.After(100 * time.Millisecond):
+							// Timeout, exit goroutine
+							return
+						}
+					}
+				}()
+				
+				// Close the OpusSend channel to stop the current stream
+				close(currentVc.OpusSend)
+				currentVc.OpusSend = nil
+			}
+		}
+
 		// Play the next track
 		playNextTrack(s, guildID, voiceState.ChannelID)
-		
+
 		// Update the message to reflect the new track
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
@@ -1396,8 +1468,32 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		}
 		mutex.Unlock()
 
-		vc.Disconnect()
+		// Stop the current audio stream by closing the OpusSend channel
+		if vc.OpusSend != nil {
+			// Create a temporary channel to drain any remaining data
+			go func() {
+				// Drain the OpusSend channel to prevent blocking
+				for {
+					select {
+					case _, ok := <-vc.OpusSend:
+						if !ok {
+							// Channel closed, exit goroutine
+							return
+						}
+					case <-time.After(100 * time.Millisecond):
+						// Timeout, exit goroutine
+						return
+					}
+				}
+			}()
+			
+			// Close the OpusSend channel to stop the current stream
+			close(vc.OpusSend)
+			vc.OpusSend = nil
+		}
 		
+		vc.Disconnect()
+
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
