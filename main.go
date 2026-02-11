@@ -322,11 +322,91 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				statsMutex.RUnlock()
 				
 				level := 0
+				lovePoints := 0
 				if exists && userStat != nil {
 					level = userStat.Level
+					lovePoints = userStat.LovePoints
 				}
 				
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Now playing: `%s`\n💝 Requested by: %s (Level %d)", track.Title, m.Author.Username, level))
+				// Create a more detailed "Now Playing" message
+				nowPlayingMessage := fmt.Sprintf(
+					"🎵 **Now Playing:** `%s`\n"+
+					"👤 **Requested by:** %s **(Level %d)**\n"+
+					"⏱️ **Duration:** %s\n"+
+					"💝 **Love Points:** %d",
+					track.Title,
+					m.Author.Username,
+					level,
+					track.Duration,
+					lovePoints,
+				)
+				
+				// Send the message with embed if thumbnail is available
+				if track.Thumbnail != "" {
+					embed := &discordgo.MessageEmbed{
+						Title:       "🎵 Now Playing",
+						URL:         track.URL,
+						Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
+						Fields: []*discordgo.MessageEmbedField{
+							{
+								Name:  "👤 Requested by",
+								Value: fmt.Sprintf("%s (Level %d)", m.Author.Username, level),
+								Inline: true,
+							},
+							{
+								Name:  "⏱️ Duration",
+								Value: track.Duration,
+								Inline: true,
+							},
+							{
+								Name:  "💝 Love Points",
+								Value: fmt.Sprintf("%d", lovePoints),
+								Inline: true,
+							},
+						},
+						Color: 0xff69b4, // Pink color for romantic feel
+						Thumbnail: &discordgo.MessageEmbedThumbnail{
+							URL: track.Thumbnail,
+						},
+					}
+					
+					// Create buttons for controls
+					components := []discordgo.MessageComponent{
+						discordgo.ActionsRow{
+							Components: []discordgo.MessageComponent{
+								discordgo.Button{
+									Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+									Style: discordgo.PrimaryButton,
+									CustomID: "pause_resume_" + m.GuildID,
+								},
+								discordgo.Button{
+									Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+									Style: discordgo.PrimaryButton,
+									CustomID: "skip_" + m.GuildID,
+								},
+								discordgo.Button{
+									Emoji: discordgo.ComponentEmoji{Name: "🛑"},
+									Style: discordgo.DangerButton,
+									CustomID: "stop_" + m.GuildID,
+								},
+								discordgo.Button{
+									Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+									Style: discordgo.SecondaryButton,
+									CustomID: "loop_" + m.GuildID,
+								},
+							},
+						},
+					}
+					
+					// Send the embed with buttons
+					s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+						Embeds:     []*discordgo.MessageEmbed{embed},
+						Components: components,
+					})
+				} else {
+					// Send simple message if no thumbnail
+					s.ChannelMessageSend(m.ChannelID, nowPlayingMessage)
+				}
 			} else {
 				// Send a message that the track was added to the queue
 				log.Printf("Track added to queue, currently playing another track in guild %s", m.GuildID)
