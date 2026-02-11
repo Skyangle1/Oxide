@@ -206,7 +206,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	// Update user stats for the message
-	updateUserStats(m.Author.ID, m.Author.Username)
+	updateUserStats(m.Author.ID)
 
 	// Convert message to lowercase for case-insensitive comparison
 	lowerContent := strings.ToLower(m.Content)
@@ -1551,7 +1551,7 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 }
 
 // updateUserStats updates user statistics when they send a message
-func updateUserStats(userID, username string) {
+func updateUserStats(userID string) {
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
 	
