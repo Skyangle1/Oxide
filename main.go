@@ -1256,6 +1256,9 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 	}
 
 connectionReady:
+	// Additional delay to ensure connection stability
+	time.Sleep(500 * time.Millisecond)
+	
 	// Strict nil check before proceeding with audio streaming
 	if vc == nil {
 		log.Printf("playNextTrack: Voice connection is nil for guild %s", guildID)
@@ -1271,6 +1274,12 @@ connectionReady:
 	// Verify that we have a valid track to play
 	if nextTrack == nil {
 		log.Printf("playNextTrack: Next track is nil for guild %s", guildID)
+		return
+	}
+
+	// Verify that the voice connection itself is not nil before accessing its properties
+	if vc == nil {
+		log.Printf("playNextTrack: Voice connection is nil for guild %s", guildID)
 		return
 	}
 
