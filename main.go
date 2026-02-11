@@ -40,10 +40,7 @@ var (
 	mutex sync.RWMutex
 	
 	// Allowed users for exclusive access
-	AllowedUsers = map[string]bool{
-		"MASUKKAN_ID_DISCORD_LU_DI_SINI": true,
-		"MASUKKAN_ID_DISCORD_PACAR_LU_DI_SINI": true,
-	}
+	AllowedUsers map[string]bool
 )
 
 // Track represents a music track
@@ -80,6 +77,22 @@ func main() {
 	appID := os.Getenv("APPLICATION_ID")
 	if appID == "" {
 		log.Println("APPLICATION_ID environment variable is not set, using bot user ID")
+	}
+
+	// Initialize allowed users from environment variable
+	allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
+	if allowedUserIDs == "" {
+		log.Fatal("ALLOWED_USER_IDS environment variable is not set")
+	}
+	
+	// Parse the comma-separated user IDs
+	AllowedUsers = make(map[string]bool)
+	idParts := strings.Split(allowedUserIDs, ",")
+	for _, id := range idParts {
+		trimmedID := strings.TrimSpace(id)
+		if trimmedID != "" {
+			AllowedUsers[trimmedID] = true
+		}
 	}
 
 	// Create a new Discord session using the provided bot token
@@ -181,8 +194,15 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		parts := strings.Fields(m.Content)
 		if len(parts) < 2 {
 			// Just called the bot without a command
-			// Special response for the girlfriend
-			if m.Author.ID == "MASUKKAN_ID_DISCORD_PACAR_LU_DI_SINI" {
+			// Special response for the girlfriend (second user ID in the list)
+			allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
+			idParts := strings.Split(allowedUserIDs, ",")
+			girlfriendID := ""
+			if len(idParts) >= 2 {
+				girlfriendID = strings.TrimSpace(idParts[1]) // Assuming the second ID is the girlfriend's
+			}
+			
+			if m.Author.ID == girlfriendID {
 				s.ChannelMessageSend(m.ChannelID, "Hai sayangku! Aku di sini untukmu. Mau dengerin lagu romantis bareng aku? ୨ৎ⭑")
 			} else {
 				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
