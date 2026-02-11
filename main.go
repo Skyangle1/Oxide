@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,6 +43,21 @@ type Track struct {
 	RequesterID string
 	RequesterUsername string
 }
+
+// UserStats holds user statistics for the leveling system
+type UserStats struct {
+	LovePoints     int
+	Level          int
+	TotalMessages  int
+	LastActivity   time.Time
+	CurrentSongRequests int
+}
+
+// Global variables for the leveling system
+var (
+	userStats = make(map[string]*UserStats)
+	statsMutex sync.RWMutex
+)
 
 // MusicQueue represents a queue of tracks
 type MusicQueue struct {
@@ -189,6 +205,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	// Update user stats for the message
+	updateUserStats(m.Author.ID, m.Author.Username)
+
 	// Convert message to lowercase for case-insensitive comparison
 	lowerContent := strings.ToLower(m.Content)
 
@@ -297,7 +316,17 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
 				playNextTrack(s, m.GuildID, voiceState.ChannelID)
 
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Now playing: `%s`", track.Title))
+				// Send enhanced now playing message with love points
+				statsMutex.RLock()
+				userStat, exists := userStats[m.Author.ID]
+				statsMutex.RUnlock()
+				
+				level := 0
+				if exists && userStat != nil {
+					level = userStat.Level
+				}
+				
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Now playing: `%s`\n💝 Requested by: %s (Level %d)", track.Title, m.Author.Username, level))
 			} else {
 				// Send a message that the track was added to the queue
 				log.Printf("Track added to queue, currently playing another track in guild %s", m.GuildID)
@@ -323,6 +352,20 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				s.ChannelMessageSend(m.ChannelID, "I am here, My Queen. Apa ada melodi yang ingin diputar? ୨ৎ⭑")
 			}
 			return
+		}
+		
+		// Handle text commands for the leveling system
+		command := strings.ToLower(parts[1])
+		switch command {
+		case "lovepoints":
+			handleLovePointsCommand(s, m)
+		case "couplestats":
+			handleCoupleStatsCommand(s, m)
+		case "loveprofile":
+			handleLoveProfileCommand(s, m)
+		default:
+			// Handle other commands or just the name being called
+			s.ChannelMessageSend(m.ChannelID, "Apa ada yang bisa aku bantu? Coba gunakan perintah seperti 'Lyre lovepoints' atau 'Queen couplestats'")
 		}
 	}
 }
@@ -708,27 +751,37 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		return
 	}
 
+	// Get user stats for the requester
+	statsMutex.RLock()
+	requesterStats, exists := userStats[currentTrack.RequesterID]
+	statsMutex.RUnlock()
+	
+	requesterLevel := 0
+	if exists && requesterStats != nil {
+		requesterLevel = requesterStats.Level
+	}
+
 	embed := &discordgo.MessageEmbed{
-		Title:       "Now Playing",
+		Title:       "🎵 Now Playing",
 		Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name:  "Duration",
+				Name:  "⏱️ Duration",
 				Value: currentTrack.Duration,
 				Inline: true,
 			},
 			{
-				Name:  "Uploader",
+				Name:  "👤 Uploaded by",
 				Value: currentTrack.Uploader,
 				Inline: true,
 			},
 			{
-				Name:  "Requested by",
-				Value: currentTrack.RequesterUsername,
+				Name:  "💝 Requested by",
+				Value: fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
 				Inline: true,
 			},
 		},
-		Color: 0x00ff00, // Green color
+		Color: 0xff69b4, // Pink color for romantic feel
 	}
 
 	// Add thumbnail if available
@@ -743,17 +796,17 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏯"},
+					Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
 					Style: discordgo.PrimaryButton,
 					CustomID: "pause_resume_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏭"},
+					Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
 					Style: discordgo.PrimaryButton,
 					CustomID: "skip_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: discordgo.ComponentEmoji{Name: "⏹"},
+					Emoji: discordgo.ComponentEmoji{Name: "⏹️"},
 					Style: discordgo.DangerButton,
 					CustomID: "stop_" + i.GuildID,
 				},
@@ -1495,5 +1548,218 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 	}
 
 	return nil, fmt.Errorf("user not in a voice channel")
+}
+
+// updateUserStats updates user statistics when they send a message
+func updateUserStats(userID, username string) {
+	statsMutex.Lock()
+	defer statsMutex.Unlock()
+	
+	userStat, exists := userStats[userID]
+	if !exists {
+		userStat = &UserStats{
+			LovePoints: 0,
+			Level: 0,
+			TotalMessages: 0,
+			LastActivity: time.Now(),
+			CurrentSongRequests: 0,
+		}
+		userStats[userID] = userStat
+	}
+	
+	// Update stats
+	userStat.TotalMessages++
+	userStat.LastActivity = time.Now()
+	
+	// Award love points for activity
+	userStat.LovePoints += 1
+	
+	// Calculate new level based on love points
+	newLevel := calculateLevel(userStat.LovePoints)
+	if newLevel > userStat.Level {
+		userStat.Level = newLevel
+	}
+}
+
+// calculateLevel calculates the level based on love points
+func calculateLevel(points int) int {
+	// Simple formula: level = sqrt(points) rounded down
+	return int(math.Sqrt(float64(points)))
+}
+
+// handleLovePointsCommand handles the lovepoints command
+func handleLovePointsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	statsMutex.RLock()
+	userStat, exists := userStats[m.Author.ID]
+	statsMutex.RUnlock()
+	
+	if !exists || userStat == nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s, you don't have any love points yet. Send some messages to earn them! 💕", m.Author.Username))
+		return
+	}
+	
+	levelName := getLevelName(userStat.Level)
+	
+	message := fmt.Sprintf(
+		"💖 **%s's Love Points** 💖\n"+
+		"**Points:** %d\n"+
+		"**Level:** %d (%s)\n"+
+		"**Messages:** %d\n"+
+		"**Songs Requested:** %d\n"+
+		"**Last Active:** %s",
+		m.Author.Username,
+		userStat.LovePoints,
+		userStat.Level,
+		levelName,
+		userStat.TotalMessages,
+		userStat.CurrentSongRequests,
+		userStat.LastActivity.Format("Jan 2, 2006 at 3:04 PM"),
+	)
+	
+	s.ChannelMessageSend(m.ChannelID, message)
+}
+
+// handleCoupleStatsCommand handles the couplestats command
+func handleCoupleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Get allowed user IDs to identify the couple
+	allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
+	idParts := strings.Split(allowedUserIDs, ",")
+	
+	if len(idParts) < 2 {
+		s.ChannelMessageSend(m.ChannelID, "Not enough users in the allowed list to show couple stats.")
+		return
+	}
+	
+	user1ID := strings.TrimSpace(idParts[0])
+	user2ID := strings.TrimSpace(idParts[1])
+	
+	statsMutex.RLock()
+	user1Stat, user1Exists := userStats[user1ID]
+	user2Stat, user2Exists := userStats[user2ID]
+	statsMutex.RUnlock()
+	
+	var user1Name, user2Name string
+	var user1Level, user2Level int
+	var user1Points, user2Points int
+	
+	// Get user names and stats
+	if user1Exists && user1Stat != nil {
+		user1Name = getUserByUsernameID(s, user1ID)
+		user1Level = user1Stat.Level
+		user1Points = user1Stat.LovePoints
+	} else {
+		user1Name = getUserByUsernameID(s, user1ID)
+	}
+	
+	if user2Exists && user2Stat != nil {
+		user2Name = getUserByUsernameID(s, user2ID)
+		user2Level = user2Stat.Level
+		user2Points = user2Stat.LovePoints
+	} else {
+		user2Name = getUserByUsernameID(s, user2ID)
+	}
+	
+	if user1Name == "" {
+		user1Name = "User1"
+	}
+	if user2Name == "" {
+		user2Name = "User2"
+	}
+	
+	message := fmt.Sprintf(
+		"💕 **Couple Statistics** 💕\n\n"+
+		"**%s**\n"+
+		"• Level: %d\n"+
+		"• Love Points: %d\n\n"+
+		"**%s**\n"+
+		"• Level: %d\n"+
+		"• Love Points: %d\n\n"+
+		"💖 Total Combined Love Points: %d 💖",
+		user1Name, user1Level, user1Points,
+		user2Name, user2Level, user2Points,
+		user1Points+user2Points,
+	)
+	
+	s.ChannelMessageSend(m.ChannelID, message)
+}
+
+// handleLoveProfileCommand handles the loveprofile command
+func handleLoveProfileCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	statsMutex.RLock()
+	userStat, exists := userStats[m.Author.ID]
+	statsMutex.RUnlock()
+	
+	if !exists || userStat == nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s, your profile is still being created. Interact more with the bot!", m.Author.Username))
+		return
+	}
+	
+	levelName := getLevelName(userStat.Level)
+	
+	// Calculate some achievements
+	achievements := []string{}
+	if userStat.TotalMessages > 100 {
+		achievements = append(achievements, "Chatty 💬")
+	}
+	if userStat.LovePoints > 50 {
+		achievements = append(achievements, "Love Master 💖")
+	}
+	if userStat.CurrentSongRequests > 10 {
+		achievements = append(achievements, "DJ Expert 🎵")
+	}
+	
+	achievementStr := "None yet"
+	if len(achievements) > 0 {
+		achievementStr = strings.Join(achievements, ", ")
+	}
+	
+	message := fmt.Sprintf(
+		"💞 **%s's Love Profile** 💞\n"+
+		"**Level:** %d (%s)\n"+
+		"**Love Points:** %d\n"+
+		"**Total Messages:** %d\n"+
+		"**Songs Requested:** %d\n"+
+		"**Achievements:** %s\n"+
+		"**Member Since:** %s",
+		m.Author.Username,
+		userStat.Level,
+		levelName,
+		userStat.LovePoints,
+		userStat.TotalMessages,
+		userStat.CurrentSongRequests,
+		achievementStr,
+		userStat.LastActivity.Format("January 2, 2006"),
+	)
+	
+	s.ChannelMessageSend(m.ChannelID, message)
+}
+
+// getLevelName returns the name for a given level
+func getLevelName(level int) string {
+	switch {
+	case level <= 2:
+		return "New Crush"
+	case level <= 5:
+		return "Getting Close"
+	case level <= 10:
+		return "Best Friends"
+	case level <= 20:
+		return "In Love"
+	case level <= 30:
+		return "Soulmates"
+	case level <= 50:
+		return "Partners Forever"
+	default:
+		return "Eternal Love"
+	}
+}
+
+// getUserByUsernameID gets a username by their ID
+func getUserByUsernameID(s *discordgo.Session, userID string) string {
+	user, err := s.User(userID)
+	if err != nil {
+		return ""
+	}
+	return user.Username
 }
 
