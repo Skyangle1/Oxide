@@ -1562,14 +1562,14 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Perform nil check on voice connection
 	if vc == nil {
 		log.Printf("playAudioStream: Voice connection is nil")
-		return
+		return fmt.Errorf("voice connection is nil")
 	}
 	
 	// Sanitize the URL
 	sanitizedURL := sanitizeURL(url)
 	if sanitizedURL == "" {
 		log.Printf("playAudioStream: Invalid URL provided: %s", url)
-		return
+		return fmt.Errorf("invalid URL provided: %s", url)
 	}
 	
 	// First, get the direct URL using yt-dlp
@@ -1611,13 +1611,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	ffmpegOut, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Printf("playAudioStream: Error creating ffmpeg output pipe: %v", err)
-		return
+		return fmt.Errorf("error creating ffmpeg output pipe: %w", err)
 	}
-	
+
 	// Start the ffmpeg command
 	if err := cmd.Start(); err != nil {
 		log.Printf("playAudioStream: Error starting ffmpeg: %v", err)
-		return
+		return fmt.Errorf("error starting ffmpeg: %w", err)
 	}
 	
 	// Read stderr in a goroutine to capture FFmpeg errors
@@ -1648,14 +1648,14 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
 		log.Println("playAudioStream: Voice connection is not ready")
-		return
+		return fmt.Errorf("voice connection is not ready")
 	}
 	
 	// Initialize Opus encoder
 	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		log.Printf("playAudioStream: Error creating Opus encoder: %v", err)
-		return
+		return fmt.Errorf("error creating Opus encoder: %w", err)
 	}
 	
 	// Set bit rate
