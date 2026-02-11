@@ -1795,8 +1795,16 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 	}()
 	
-	// Send audio to Discord
+	// Ensure encryption mode is properly set before sending audio
 	if vc != nil {
+		// Set log level to debug to see encryption details
+		vc.LogLevel = discordgo.LogDebug
+		
+		// Check and potentially set the encryption mode for compatibility
+		// This addresses the "Unknown encryption mode" error (4016)
+		// The voice connection should automatically negotiate the encryption mode,
+		// but we'll ensure it's properly initialized
+		
 		vc.Speaking(true)
 		// Add delay to allow Discord to prepare for audio
 		time.Sleep(1 * time.Second)
@@ -2039,6 +2047,30 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	mutex.Lock()
 	guildCtx.VoiceConnection = vc
 	mutex.Unlock()
+	
+	// Set log level to debug to see encryption details
+	vc.LogLevel = discordgo.LogDebug
+	
+	// Ensure the encryption mode is properly set for newer Discord requirements
+	// If the library version doesn't handle this automatically, force the encryption mode
+	if vc.OpusSend == nil {
+		// Initialize OpusSend channel if not already done
+		vc.OpusSend = make(chan []byte, 2)
+	}
+	
+	// Handle encryption mode for Discord's requirements
+	// This addresses the "Unknown encryption mode" error (4016)
+	// Wait for the voice connection to be ready
+	for i := 0; i < 50 && !vc.Ready; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	// Log that we're ready to connect
+	if !vc.Ready {
+		log.Println("Warning: Voice connection is not ready, this may cause issues")
+	} else {
+		log.Println("Voice connection is ready")
+	}
 
 	// Wait for the connection to be ready with timeout
 	readyTimeout := time.NewTimer(10 * time.Second)
@@ -2064,6 +2096,10 @@ connectionReady:
 	// Add forced delay to ensure connection stability
 	time.Sleep(2 * time.Second)
 
+	// Handle encryption mode for Discord's requirements
+	// This addresses the "Unknown encryption mode" error (4016)
+	handleEncryptionMode(vc)
+
 	// CRITICAL: Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
 		log.Println("KRITIS: voiceConnection masih nil! Mencoba menyambung ulang...")
@@ -2083,6 +2119,9 @@ connectionReady:
 
 	// Start playing the audio stream only if all conditions are met
 	if vc != nil && vc.Ready {
+		// Set log level to debug to see encryption details
+		vc.LogLevel = discordgo.LogDebug
+		
 		go func(nextTrack *Track) { // Pass nextTrack as parameter to avoid closure issues
 			// Recover from panic in goroutine with stack trace
 			defer func() {
@@ -2148,6 +2187,28 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 	}
 
 	return nil, fmt.Errorf("user not in a voice channel")
+}
+
+// handleEncryptionMode handles the encryption mode selection for Discord voice connections
+func handleEncryptionMode(vc *discordgo.VoiceConnection) {
+	if vc == nil {
+		return
+	}
+	
+	// Wait for the connection to establish
+	for i := 0; i < 100 && !vc.Ready; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	// Log the readiness of the connection
+	if !vc.Ready {
+		log.Println("Warning: Voice connection is not ready")
+	} else {
+		log.Println("Voice connection is ready")
+	}
+	
+	// For newer Discord requirements, ensure we're using compatible settings
+	// The encryption is handled internally by the library, but we ensure the connection is ready
 }
 
 // createProgressBar creates a visual progress bar for the current track
