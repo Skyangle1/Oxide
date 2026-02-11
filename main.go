@@ -363,6 +363,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			handleCoupleStatsCommand(s, m)
 		case "loveprofile":
 			handleLoveProfileCommand(s, m)
+		case "help":
+			handleHelpCommand(s, m)
 		default:
 			// Handle other commands or just the name being called
 			s.ChannelMessageSend(m.ChannelID, "Apa ada yang bisa aku bantu? Coba gunakan perintah seperti 'Lyre lovepoints' atau 'Queen couplestats'")
@@ -1761,5 +1763,36 @@ func getUserByUsernameID(s *discordgo.Session, userID string) string {
 		return ""
 	}
 	return user.Username
+}
+
+// handleHelpCommand handles the help command
+func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	helpMessage := `
+💖 **OXIDE MUSIC BOT - HELP** 💖
+
+🎵 **Musik Commands:**
+• "Lyre play [link/search]" atau "Queen play [link/search]" - Putar lagu dari YouTube
+
+💝 **Love System Commands:**
+• "Lyre lovepoints" atau "Queen lovepoints" - Lihat poin cinta dan level kamu
+• "Lyre couplestats" atau "Queen couplestats" - Lihat statistik pasangan
+• "Lyre loveprofile" atau "Queen loveprofile" - Lihat profil lengkap kamu
+• "Lyre help" atau "Queen help" - Menampilkan pesan bantuan ini
+
+🎵 **Interaksi Musik:**
+• Gunakan tombol ⏯️ untuk pause/resume
+• Gunakan tombol ⏭️ untuk skip lagu
+• Gunakan tombol 🔁 untuk mengulang lagu
+• Gunakan tombol 🛑 untuk menghentikan pemutaran
+
+💕 **Catatan:**
+• Setiap kali kamu mengirim pesan, kamu mendapatkan poin cinta!
+• Semakin sering berinteraksi, semakin tinggi level kamu!
+• Kamu dan pasanganmu membentuk tim yang hebat! 💕
+
+Selamat menikmati musik dan membangun hubungan kalian! 🎶
+	`
+	
+	s.ChannelMessageSend(m.ChannelID, helpMessage)
 }
 
