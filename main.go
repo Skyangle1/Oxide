@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -1165,10 +1166,11 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 // playNextTrack plays the next track in the queue
 func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
-	// Recover from panic
+	// Recover from panic with stack trace
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Recovered from panic in playNextTrack: %v", r)
+			log.Printf("Stack trace:\n%s", debug.Stack())
 		}
 	}()
 
@@ -1180,34 +1182,42 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 		// This is a simplified approach - in practice, you'd need to track this differently
 		return
 	}
-	
+
 	// Validate guildID
 	if guildID == "" {
 		log.Printf("playNextTrack: Invalid guildID provided")
 		return
 	}
-	
+
+	// Lock mutex for thread-safe access to music queues
 	mutex.Lock()
 	queue, exists := musicQueues[guildID]
 	if !exists || len(queue.Tracks) == 0 {
 		mutex.Unlock()
 		// Queue is empty, disconnect from voice if no one else is listening
-		if vc, err := getConnectedVoiceConnection(s, guildID); err == nil && vc != nil {
-			// Check if anyone else is in the voice channel
-			guild, err := s.State.Guild(guildID)
-			if err != nil {
+		vc, err := getConnectedVoiceConnection(s, guildID)
+		if err != nil || vc == nil {
+			return
+		}
+
+		// Check if anyone else is in the voice channel
+		guild, err := s.State.Guild(guildID)
+		if err != nil {
+			if vc != nil {
 				vc.Disconnect()
+			}
+			return
+		}
+
+		for _, vs := range guild.VoiceStates {
+			if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
+				// Someone else is still in the channel, don't disconnect
 				return
 			}
-			
-			for _, vs := range guild.VoiceStates {
-				if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != s.State.User.ID {
-					// Someone else is still in the channel, don't disconnect
-					return
-				}
-			}
-			
-			// No one else is in the channel, disconnect
+		}
+
+		// No one else is in the channel, disconnect
+		if vc != nil {
 			vc.Disconnect()
 		}
 		return
@@ -1226,7 +1236,7 @@ func playNextTrack(s *discordgo.Session, i *discordgo.InteractionCreate, channel
 
 	// Store the current track
 	currentTracks[guildID] = nextTrack
-	mutex.Unlock()
+	mutex.Unlock() // Unlock after updating the queue
 
 	// Connect to voice channel if not already connected
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -1260,14 +1270,8 @@ connectionReady:
 	time.Sleep(500 * time.Millisecond)
 	
 	// Strict nil check before proceeding with audio streaming
-	if vc == nil {
-		log.Printf("playNextTrack: Voice connection is nil for guild %s", guildID)
-		return
-	}
-	
-	// Double-check that the connection is ready
-	if !vc.Ready {
-		log.Printf("playNextTrack: Voice connection is not ready for guild %s", guildID)
+	if vc == nil || !vc.Ready {
+		log.Println("Error: Voice connection is nil or not ready")
 		return
 	}
 
@@ -1277,19 +1281,14 @@ connectionReady:
 		return
 	}
 
-	// Verify that the voice connection itself is not nil before accessing its properties
-	if vc == nil {
-		log.Printf("playNextTrack: Voice connection is nil for guild %s", guildID)
-		return
-	}
-
 	// Start playing the audio stream only if all conditions are met
 	if vc != nil && vc.Ready && nextTrack != nil {
 		go func() {
-			// Recover from panic in goroutine
+			// Recover from panic in goroutine with stack trace
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("Recovered from panic in playAudioStream goroutine: %v", r)
+					log.Printf("Stack trace:\n%s", debug.Stack())
 					// Try to play the next track if available
 					if vc != nil {
 						playNextTrack(s, &discordgo.InteractionCreate{}, vc.ChannelID)
