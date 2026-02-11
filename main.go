@@ -1581,7 +1581,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		if stderrErr != nil {
 			log.Printf("playAudioStream: yt-dlp get-url stderr: %s", string(stderr))
 		}
-		return
+		return fmt.Errorf("error getting direct URL from yt-dlp: %w", err)
 	}
 	
 	directURL := strings.TrimSpace(string(urlOutput))
