@@ -990,10 +990,11 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		// Play the next track
 		playNextTrack(s, guildID, voiceState.ChannelID)
 		
+		// Update the message to reflect the new track
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content: "Skipped the current track.",
+				Content: "Skipped the current track. Playing next track...",
 			},
 		})
 	case strings.HasPrefix(buttonID, "stop"):
@@ -1015,7 +1016,7 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content: "Stopped playback and cleared the queue.",
+				Content: "Playback stopped and queue cleared.",
 			},
 		})
 	case strings.HasPrefix(buttonID, "loop"):
@@ -1044,7 +1045,7 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("Loop mode %s.", status),
+				Content: fmt.Sprintf("🔄 Loop mode %s.", status),
 			},
 		})
 	}
