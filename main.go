@@ -2561,6 +2561,7 @@ func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discord
 
 // Helper function to get user's voice state
 func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.VoiceState, error) {
+	// First, try to get from state cache
 	guild, err := s.State.Guild(guildID)
 	if err != nil {
 		return nil, err
@@ -2569,6 +2570,24 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 	if guild != nil && guild.VoiceStates != nil {
 		for _, vs := range guild.VoiceStates {
 			if vs != nil && vs.UserID == userID {
+				return vs, nil
+			}
+		}
+	}
+
+	// If not found in state cache, try to refresh the guild state and check again
+	// This helps when the state cache is not up-to-date
+	refreshedGuild, err := s.Guild(guildID)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Get the voice states from the refreshed guild
+	if refreshedGuild != nil && refreshedGuild.VoiceStates != nil {
+		for _, vs := range refreshedGuild.VoiceStates {
+			if vs != nil && vs.UserID == userID {
+				// Update the state cache with the fresh data
+				s.State.GuildAdd(refreshedGuild)
 				return vs, nil
 			}
 		}
