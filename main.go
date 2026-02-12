@@ -3015,17 +3015,18 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 	frameCounter := 0
 
+	audioStreamLoop:
 	for vc != nil && vc.Ready && vc.OpusSend != nil {
 		// Use a select statement to check for context cancellation
 		select {
 		case <-ctx.Done():
 			log.Println("playAudioStream: Context cancelled, stopping playback")
-			break
+			break audioStreamLoop
 		default:
 			// Check if the voice connection is still active
 			if vc == nil || !vc.Ready {
 				log.Println("playAudioStream: Voice connection is nil or not ready")
-				break
+				break audioStreamLoop
 			}
 
 			// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
@@ -3039,7 +3040,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					if vc != nil {
 						log.Println("playAudioStream: Checking connection after end of stream")
 					}
-					break
+					break audioStreamLoop
 				}
 				log.Printf("playAudioStream: Error reading audio: %v", err)
 				continue
@@ -3068,7 +3069,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				// Check if voice connection is still active before sending audio
 				if vc == nil || !vc.Ready {
 					log.Println("playAudioStream: Voice connection lost, stopping playback")
-					break
+					break audioStreamLoop
 				}
 
 				// Strict nil check before sending the encoded Opus frame to Discord
@@ -3092,7 +3093,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					}
 				} else {
 					log.Printf("playAudioStream: OpusSend channel is nil, stopping playback")
-					break
+					break audioStreamLoop
 				}
 			}
 		}
