@@ -2825,22 +2825,22 @@ func handleSearchCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				discordgo.ActionsRow{
 					Components: []discordgo.MessageComponent{
 						discordgo.Button{
-							Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+							Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
 							Style: discordgo.PrimaryButton,
 							CustomID: "pause_resume_" + i.GuildID,
 						},
 						discordgo.Button{
-							Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+							Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
 							Style: discordgo.PrimaryButton,
 							CustomID: "skip_" + i.GuildID,
 						},
 						discordgo.Button{
-							Emoji: discordgo.ComponentEmoji{Name: "⏹️"},
+							Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
 							Style: discordgo.DangerButton,
 							CustomID: "stop_" + i.GuildID,
 						},
 						discordgo.Button{
-							Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+							Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
 							Style: discordgo.SecondaryButton,
 							CustomID: "loop_" + i.GuildID,
 						},
@@ -2849,7 +2849,7 @@ func handleSearchCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				discordgo.ActionsRow{
 					Components: []discordgo.MessageComponent{
 						discordgo.Button{
-							Emoji: discordgo.ComponentEmoji{Name: "🛡️"},
+							Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
 							Style: discordgo.SuccessButton,
 							CustomID: "guard_room_" + i.GuildID,
 						},
