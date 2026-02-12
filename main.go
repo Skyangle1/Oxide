@@ -677,20 +677,25 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					}
 				}
 
-				// If nothing is currently playing, start playback
-				var tempGuildCtx *GuildContext
-				var tempExists bool
-				var hasTrack bool
+				// Check if bot should start playing immediately
+				shouldStartPlayback := false
+				
 				mutex.RLock()
-				tempGuildCtx, tempExists = guildContexts[m.GuildID]
-				hasTrack = false
-				if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
-					hasTrack = true
+				guildCtxTemp, exists := guildContexts[m.GuildID]
+				if exists && guildCtxTemp != nil {
+					// Start playback if there's no current track AND no tracks in the queue
+					// OR if there's no current track but the queue is empty
+					if guildCtxTemp.CurrentTrack == nil {
+						if guildCtxTemp.MusicQueue == nil || len(guildCtxTemp.MusicQueue.Tracks) <= 1 {
+							// If there's no current track and queue has 0 or 1 track (the one we just added), start playback
+							shouldStartPlayback = true
+						}
+					}
 				}
 				mutex.RUnlock()
 
-				if !hasTrack {
-					log.Printf("Nothing playing, starting playback for guild %s", m.GuildID)
+				if shouldStartPlayback {
+					log.Printf("No current track playing, starting playback for guild %s", m.GuildID)
 					playNextTrack(s, m.GuildID, voiceState.ChannelID)
 
 					// Send enhanced now playing message with love points
@@ -1088,20 +1093,23 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	// If nothing is currently playing, start playback
-	var tempGuildCtx *GuildContext
-	var tempExists bool
-	var hasTrack bool
+	// Check if bot should start playing immediately
+	shouldStartPlayback := false
+	
 	mutex.RLock()
-	tempGuildCtx, tempExists = guildContexts[i.GuildID]
-	hasTrack = false
-	if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
-		hasTrack = true
+	guildCtxTemp, exists := guildContexts[i.GuildID]
+	if exists && guildCtxTemp != nil {
+		// Start playback if there's no current track AND the queue has 0 or 1 track (the one we just added)
+		if guildCtxTemp.CurrentTrack == nil {
+			if guildCtxTemp.MusicQueue == nil || len(guildCtxTemp.MusicQueue.Tracks) <= 1 {
+				shouldStartPlayback = true
+			}
+		}
 	}
 	mutex.RUnlock()
 
-	if !hasTrack {
-		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
+	if shouldStartPlayback {
+		log.Printf("No current track playing, starting playback for guild %s", i.GuildID)
 		playNextTrack(s, i.GuildID, voiceState.ChannelID)
 
 		// Use follow-up message to respond after defer
@@ -3594,20 +3602,23 @@ func handleSearchCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	log.Printf("Added track '%s' to queue for guild %s", track.Title, i.GuildID)
 
-	// If nothing is currently playing, start playback
-	var tempGuildCtx *GuildContext
-	var tempExists bool
-	var hasTrack bool
+	// Check if bot should start playing immediately
+	shouldStartPlayback := false
+	
 	mutex.RLock()
-	tempGuildCtx, tempExists = guildContexts[i.GuildID]
-	hasTrack = false
-	if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
-		hasTrack = true
+	guildCtxTemp, exists := guildContexts[i.GuildID]
+	if exists && guildCtxTemp != nil {
+		// Start playback if there's no current track AND the queue has 0 or 1 track (the one we just added)
+		if guildCtxTemp.CurrentTrack == nil {
+			if guildCtxTemp.MusicQueue == nil || len(guildCtxTemp.MusicQueue.Tracks) <= 1 {
+				shouldStartPlayback = true
+			}
+		}
 	}
 	mutex.RUnlock()
-	
-	if !hasTrack {
-		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
+
+	if shouldStartPlayback {
+		log.Printf("No current track playing, starting playback for guild %s", i.GuildID)
 		playNextTrack(s, i.GuildID, voiceState.ChannelID)
 
 		// Send enhanced now playing message with love points
