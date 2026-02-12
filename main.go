@@ -2253,14 +2253,37 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		// The voice connection should automatically negotiate the encryption mode,
 		// but we'll ensure it's properly initialized
 
-		vc.Speaking(true)
+		// Set speaking status with error handling
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Recovered from panic in vc.Speaking(): %v", r)
+				}
+			}()
+			err := vc.Speaking(true)
+			if err != nil {
+				log.Printf("Error setting speaking status: %v", err)
+			}
+		}()
+		
 		// Add delay to allow Discord to prepare for audio
 		time.Sleep(1 * time.Second)
 	}
 
 	defer func() {
 		if vc != nil {
-			vc.Speaking(false)
+			// Set speaking status to false with error handling
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("Recovered from panic in vc.Speaking(false): %v", r)
+					}
+				}()
+				err := vc.Speaking(false)
+				if err != nil {
+					log.Printf("Error setting speaking status to false: %v", err)
+				}
+			}()
 		}
 		// Remove the current track from the guild context
 		mutex.Lock()
@@ -2365,7 +2388,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				// This addresses the "Unknown encryption mode" error (4016)
 				select {
 				case vc.OpusSend <- opusData:
-					log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
+					// Only log every 50 frames to reduce verbosity
+					if frameCounter%50 == 0 {
+						log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
+					}
 					frameCounter++
 
 					// Log successful frame every 100 frames
@@ -2737,6 +2763,10 @@ connectionReadyLabel:
 							}
 							
 							if newVc.Ready {
+								// Initialize OpusSend channel with larger buffer
+								if newVc.OpusSend == nil {
+									newVc.OpusSend = make(chan []byte, 100)
+								}
 								break
 							} else {
 								log.Printf("Reconnected VC not ready, attempt %d/3", reconnectAttempt+1)
