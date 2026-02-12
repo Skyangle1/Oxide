@@ -3194,73 +3194,86 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	guildCtx.CurrentTrack = nextTrack
 	mutex.Unlock() // Unlock after updating the queue
 
-	// Connect to voice channel if not already connected
-	// Enhanced retry mechanism for handling 4016 errors during voice connection
-	maxRetries := 5  // Increased retries
-	retryCount := 0
+	// Check if we already have a voice connection for this guild
+	mutex.RLock()
+	existingVc := guildCtx.VoiceConnection
+	mutex.RUnlock()
+
 	var vc *discordgo.VoiceConnection
 	var err error
 
-	for retryCount < maxRetries {
-		// Disconnect any existing connection first to reset state
-		if vc != nil {
-			vc.Disconnect()
-			time.Sleep(500 * time.Millisecond) // Brief pause before reconnection
-		}
-		
-		vc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
-		if err == nil && vc != nil {
-			// Wait for connection to be ready
-			readyWait := 0
-			for readyWait < 50 && !vc.Ready {
-				time.Sleep(100 * time.Millisecond)
-				readyWait++
+	// Reuse existing voice connection if it's still active, otherwise join
+	if existingVc != nil && existingVc.Ready && existingVc.ChannelID == channelID {
+		// Reuse existing connection
+		vc = existingVc
+		log.Printf("playNextTrack: Reusing existing voice connection for guild %s", guildID)
+	} else {
+		// Join voice channel since no active connection exists
+		// Enhanced retry mechanism for handling 4016 errors during voice connection
+		maxRetries := 5  // Increased retries
+		retryCount := 0
+
+		for retryCount < maxRetries {
+			// Only disconnect if we have an existing connection that's not ready or on wrong channel
+			if existingVc != nil && (existingVc.ChannelID != channelID || !existingVc.Ready) {
+				existingVc.Disconnect()
+				time.Sleep(500 * time.Millisecond) // Brief pause before reconnection
 			}
 			
-			if vc.Ready {
-				log.Printf("playNextTrack: Successfully joined voice channel for guild %s", guildID)
-				break
-			} else {
-				log.Printf("playNextTrack: Connection not ready after waiting, retrying... (%d/%d)", retryCount+1, maxRetries)
+			vc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
+			if err == nil && vc != nil {
+				// Wait for connection to be ready
+				readyWait := 0
+				for readyWait < 50 && !vc.Ready {
+					time.Sleep(100 * time.Millisecond)
+					readyWait++
+				}
+				
+				if vc.Ready {
+					log.Printf("playNextTrack: Successfully joined voice channel for guild %s", guildID)
+					break
+				} else {
+					log.Printf("playNextTrack: Connection not ready after waiting, retrying... (%d/%d)", retryCount+1, maxRetries)
+					vc.Disconnect()
+				}
+			} else if vc != nil {
+				// If there was an error but vc is not nil, disconnect it
 				vc.Disconnect()
 			}
-		} else if vc != nil {
-			// If there was an error but vc is not nil, disconnect it
-			vc.Disconnect()
+
+			// Check if the error is related to encryption mode
+			if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
+				log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+				retryCount++
+
+				// Wait longer before retrying for encryption errors
+				time.Sleep(3 * time.Second)
+				continue
+			} else if err != nil {
+				// Different error, log and retry
+				log.Printf("playNextTrack: Error joining voice channel (attempt %d/%d): %v", retryCount+1, maxRetries, err)
+				retryCount++
+				time.Sleep(2 * time.Second) // Wait before retrying
+				continue
+			} else if vc == nil {
+				// Voice connection is nil, retry
+				log.Printf("playNextTrack: Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
+				retryCount++
+				time.Sleep(1 * time.Second)
+				continue
+			}
 		}
 
-		// Check if the error is related to encryption mode
-		if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
-			log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
-			retryCount++
-
-			// Wait longer before retrying for encryption errors
-			time.Sleep(3 * time.Second)
-			continue
-		} else if err != nil {
-			// Different error, log and retry
-			log.Printf("playNextTrack: Error joining voice channel (attempt %d/%d): %v", retryCount+1, maxRetries, err)
-			retryCount++
-			time.Sleep(2 * time.Second) // Wait before retrying
-			continue
-		} else if vc == nil {
-			// Voice connection is nil, retry
-			log.Printf("playNextTrack: Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
-			retryCount++
-			time.Sleep(1 * time.Second)
-			continue
+		if vc == nil {
+			log.Printf("playNextTrack: Failed to join voice channel after %d attempts", maxRetries)
+			return
 		}
-	}
 
-	if vc == nil {
-		log.Printf("playNextTrack: Failed to join voice channel after %d attempts", maxRetries)
-		return
+		// Store the voice connection in the guild context
+		mutex.Lock()
+		guildCtx.VoiceConnection = vc
+		mutex.Unlock()
 	}
-
-	// Store the voice connection in the guild context
-	mutex.Lock()
-	guildCtx.VoiceConnection = vc
-	mutex.Unlock()
 
 	// Set log level to debug to see encryption details
 	vc.LogLevel = discordgo.LogDebug
@@ -3322,30 +3335,8 @@ connectionReadyLabel:
 
 	// CRITICAL: Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
-		log.Println("KRITIS: voiceConnection still not ready! Attempting reconnection...")
-		// Try to rejoin once more
-		newVc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
-		if err != nil || newVc == nil {
-			log.Printf("Failed to rejoin voice channel: %v", err)
-			return
-		}
-		
-		// Wait for the new connection to be ready
-		for i := 0; i < 100 && !newVc.Ready; i++ {
-			time.Sleep(100 * time.Millisecond)
-		}
-		
-		if !newVc.Ready {
-			log.Println("New voice connection still not ready, aborting playback")
-			return
-		}
-		
-		vc = newVc
-		
-		// Update the voice connection in the guild context
-		mutex.Lock()
-		guildCtx.VoiceConnection = vc
-		mutex.Unlock()
+		log.Println("KRITIS: voiceConnection still not ready! Cannot proceed with playback.")
+		return
 	}
 
 	// Double-check the voice connection from the guild context
