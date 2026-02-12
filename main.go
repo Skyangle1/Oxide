@@ -528,7 +528,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		// Check if the message author is in the allowed users list
 		if !AllowedUsers[m.Author.ID] {
 			// Send a strong message to unauthorized users
-			s.ChannelMessageSend(m.ChannelID, "❌ **PERINGATAN!** ❌\n\nMaaf, Anda tidak memiliki izin untuk menggunakan perintah bot ini. Bot ini hanya untuk penggunaan eksklusif oleh dua orang yang telah ditentukan. Mohon tinggalkan channel ini dan jangan coba-coba mengakses fitur ini lagi.")
+			s.ChannelMessageSend(m.ChannelID, "💖 **PERINGATAN UNTUK ORANG YANG DISAYANGI!** 💖\n\nSayangku, kamu tidak memiliki izin untuk menggunakan perintah bot ini. Bot ini adalah hadiah istimewa hanya untuk dua hati yang saling mencintai. Mohon tinggalkan channel ini dan biarkan cinta kami mengalun indah dalam harmoni musik ini. 💕🎶")
 			return
 		}
 
