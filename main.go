@@ -2178,8 +2178,14 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			// Wait for the next tick to maintain proper timing
 			<-ticker.C
 
+			// Check if voice connection is still active before sending audio
+			if vc == nil || !vc.Ready {
+				log.Println("playAudioStream: Voice connection lost, stopping playback")
+				break
+			}
+			
 			// Strict nil check before sending the encoded Opus frame to Discord
-			if vc != nil && vc.OpusSend != nil {
+			if vc.OpusSend != nil {
 				// Ensure compatibility with AEAD encryption modes required by Discord
 				// This addresses the "Unknown encryption mode" error (4016)
 				select {
@@ -2195,7 +2201,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
 				}
 			} else {
-				log.Printf("playAudioStream: Voice connection or OpusSend is nil, stopping playback")
+				log.Printf("playAudioStream: OpusSend channel is nil, stopping playback")
 				break
 			}
 		}
@@ -2209,10 +2215,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	if cmd.Process != nil {
 		cmd.Process.Kill()
 	}
-	
+
 	// The progressUpdaterCancel() is deferred earlier in the function
 	// It will be called automatically when the function exits
-	
+
 	// Ensure we clean up any remaining resources
 	done := make(chan error, 1)
 	go func() {
@@ -2222,7 +2228,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			done <- nil
 		}
 	}()
-	
+
 	select {
 	case <-time.After(3 * time.Second):
 		// Process hasn't finished in time, but we continue anyway
@@ -2232,7 +2238,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			log.Printf("Command finished with error: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
