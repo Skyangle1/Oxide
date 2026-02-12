@@ -2633,10 +2633,15 @@ func formatDuration(seconds float64) string {
 
 // playAudioStream plays audio from a URL using yt-dlp and ffmpeg
 func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, requesterUsername string) error {
-	// Recover from panic
+	// Create a cancellable context for managing the audio stream lifecycle
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Recover from panic with stack trace
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Recovered from panic in playAudioStream: %v", r)
+			log.Printf("Stack trace:\n%s", debug.Stack())
 		}
 	}()
 
@@ -2655,8 +2660,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		return fmt.Errorf("invalid URL provided: %s", url)
 	}
 
-	// First, get the direct URL using yt-dlp
-	getUrlCmd := exec.Command("/usr/bin/yt-dlp", "--get-url", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--no-playlist", "--", sanitizedURL)
+	// First, get the direct URL using yt-dlp with context
+	getUrlCmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", "--get-url", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--no-playlist", "--", sanitizedURL)
 	urlOutput, err := getUrlCmd.Output()
 	if err != nil {
 		log.Printf("playAudioStream: Error getting direct URL from yt-dlp: %v", err)
@@ -2674,9 +2679,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	prefs := getOrCreateUserPrefs(requesterUsername)
 	volume := prefs.Volume
 
-	// Create the ffmpeg command with the direct URL and volume adjustment
-	// Using exact args for Discord audio: -f s16le -ar 48000 -ac 2 pipe:1
-	cmd := exec.Command("ffmpeg",
+	// Create the ffmpeg command with context for proper cancellation
+	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
@@ -2703,12 +2707,19 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		return fmt.Errorf("error starting ffmpeg: %w", err)
 	}
 
+	// Create a channel to signal when the command has finished
+	cmdDone := make(chan error, 1)
+	go func() {
+		cmdDone <- cmd.Wait()
+	}()
+
 	// Read stderr in a goroutine to capture FFmpeg errors
 	go func() {
-		// Recover from panic in goroutine
+		// Recover from panic in goroutine with stack trace
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("Recovered from panic in ffmpeg stderr reader: %v", r)
+				log.Printf("Stack trace:\n%s", debug.Stack())
 			}
 		}()
 
@@ -2723,21 +2734,32 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	// Create a reader from the stdout pipe
 	reader := bufio.NewReader(ffmpegOut)
 
-	// Wait for the voice connection to be ready
-	for vc != nil && !vc.Ready {
-		time.Sleep(10 * time.Millisecond)
+	// Wait for the voice connection to be ready with improved logic
+	readyAttempts := 0
+	maxReadyAttempts := 100 // Increased attempts
+	for vc != nil && !vc.Ready && readyAttempts < maxReadyAttempts {
+		time.Sleep(50 * time.Millisecond) // Shorter delay between checks
+		readyAttempts++
 	}
 
 	// Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
-		log.Println("playAudioStream: Voice connection is not ready")
-		return fmt.Errorf("voice connection is not ready")
+		log.Println("playAudioStream: Voice connection is not ready after waiting")
+		// Force kill the process to free resources immediately
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		return fmt.Errorf("voice connection is not ready after waiting")
 	}
 
 	// Initialize Opus encoder
 	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		log.Printf("playAudioStream: Error creating Opus encoder: %v", err)
+		// Force kill the process to free resources immediately
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
 		return fmt.Errorf("error creating Opus encoder: %w", err)
 	}
 
@@ -2760,16 +2782,17 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	mutex.Unlock()
 
 	// Start a goroutine to update the "Now Playing" message with progress bar
-	progressUpdaterCtx, progressUpdaterCancel := context.WithCancel(context.Background())
-	defer progressUpdaterCancel()
-
+	progressUpdaterCtx, progressUpdaterCancel := context.WithCancel(ctx)
+	progressUpdaterDone := make(chan struct{})
+	
 	go func() {
-		// Recover from panic in goroutine
+		// Recover from panic in goroutine with stack trace
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("Recovered from panic in progress updater goroutine: %v", r)
 				log.Printf("Stack trace:\n%s", debug.Stack())
 			}
+			close(progressUpdaterDone)
 		}()
 
 		ticker := time.NewTicker(5 * time.Second) // Update every 5 seconds
@@ -2940,6 +2963,11 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		mutex.Unlock()
 
+		// Cancel the progress updater context to stop the goroutine
+		progressUpdaterCancel()
+		// Wait for the progress updater to finish
+		<-progressUpdaterDone
+
 		// Play the next track if available and connection still exists
 		if vc != nil {
 			// We need to get the guildID from the voice connection or guild contexts
@@ -2980,77 +3008,84 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	frameCounter := 0
 
 	for vc != nil && vc.Ready && vc.OpusSend != nil {
-		// Check if the voice connection is still active
-		if vc == nil || !vc.Ready {
-			log.Println("playAudioStream: Voice connection is nil or not ready")
+		// Use a select statement to check for context cancellation
+		select {
+		case <-ctx.Done():
+			log.Println("playAudioStream: Context cancelled, stopping playback")
 			break
-		}
-
-		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
-		audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
-		n, err := io.ReadFull(reader, audioBytes)
-		if err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				log.Println("playAudioStream: End of audio stream reached")
-
-				// Handle end of stream - check if connection still exists before continuing
-				if vc != nil {
-					log.Println("playAudioStream: Checking connection after end of stream")
-				}
+		default:
+			// Check if the voice connection is still active
+			if vc == nil || !vc.Ready {
+				log.Println("playAudioStream: Voice connection is nil or not ready")
 				break
 			}
-			log.Printf("playAudioStream: Error reading audio: %v", err)
-			continue
-		}
 
-		if n > 0 && vc != nil && vc.OpusSend != nil {
-			// Convert bytes to int16 samples
-			for i := 0; i < n/2; i++ {
-				// Correctly convert little-endian bytes to int16
-				pcmBuf[i] = int16(audioBytes[i*2]) | int16(audioBytes[i*2+1])<<8
-			}
-
-			// Encode to Opus
-			opusData, err := enc.Encode(pcmBuf[:n/2], 960, 4000) // 960 samples per channel, max 4000 bytes
+			// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
+			audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
+			n, err := io.ReadFull(reader, audioBytes)
 			if err != nil {
-				log.Printf("playAudioStream: Error encoding to Opus: %v", err)
+				if err == io.EOF || err == io.ErrUnexpectedEOF {
+					log.Println("playAudioStream: End of audio stream reached")
+
+					// Handle end of stream - check if connection still exists before continuing
+					if vc != nil {
+						log.Println("playAudioStream: Checking connection after end of stream")
+					}
+					break
+				}
+				log.Printf("playAudioStream: Error reading audio: %v", err)
 				continue
 			}
 
-			// Check the size of the encoded data
-			log.Printf("Encoded Opus data size: %d bytes", len(opusData))
-
-			// Wait for the next tick to maintain proper timing
-			<-ticker.C
-
-			// Check if voice connection is still active before sending audio
-			if vc == nil || !vc.Ready {
-				log.Println("playAudioStream: Voice connection lost, stopping playback")
-				break
-			}
-
-			// Strict nil check before sending the encoded Opus frame to Discord
-			if vc.OpusSend != nil {
-				// Ensure compatibility with AEAD encryption modes required by Discord
-				// This addresses the "Unknown encryption mode" error (4016)
-				select {
-				case vc.OpusSend <- opusData:
-					// Only log every 50 frames to reduce verbosity
-					if frameCounter%50 == 0 {
-						log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
-					}
-					frameCounter++
-
-					// Log successful frame every 100 frames
-					if frameCounter%100 == 0 {
-						log.Printf("playAudioStream: Successfully sent %d Opus frames to Discord", frameCounter)
-					}
-				case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
-					log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
+			if n > 0 && vc != nil && vc.OpusSend != nil {
+				// Convert bytes to int16 samples
+				for i := 0; i < n/2; i++ {
+					// Correctly convert little-endian bytes to int16
+					pcmBuf[i] = int16(audioBytes[i*2]) | int16(audioBytes[i*2+1])<<8
 				}
-			} else {
-				log.Printf("playAudioStream: OpusSend channel is nil, stopping playback")
-				break
+
+				// Encode to Opus
+				opusData, err := enc.Encode(pcmBuf[:n/2], 960, 4000) // 960 samples per channel, max 4000 bytes
+				if err != nil {
+					log.Printf("playAudioStream: Error encoding to Opus: %v", err)
+					continue
+				}
+
+				// Check the size of the encoded data
+				log.Printf("Encoded Opus data size: %d bytes", len(opusData))
+
+				// Wait for the next tick to maintain proper timing
+				<-ticker.C
+
+				// Check if voice connection is still active before sending audio
+				if vc == nil || !vc.Ready {
+					log.Println("playAudioStream: Voice connection lost, stopping playback")
+					break
+				}
+
+				// Strict nil check before sending the encoded Opus frame to Discord
+				if vc.OpusSend != nil {
+					// Ensure compatibility with AEAD encryption modes required by Discord
+					// This addresses the "Unknown encryption mode" error (4016)
+					select {
+					case vc.OpusSend <- opusData:
+						// Only log every 50 frames to reduce verbosity
+						if frameCounter%50 == 0 {
+							log.Printf("Successfully sent %d bytes as Opus frame to Discord", len(opusData))
+						}
+						frameCounter++
+
+						// Log successful frame every 100 frames
+						if frameCounter%100 == 0 {
+							log.Printf("playAudioStream: Successfully sent %d Opus frames to Discord", frameCounter)
+						}
+					case <-time.After(100 * time.Millisecond): // Timeout to prevent blocking
+						log.Printf("playAudioStream: Timeout sending frame %d, channel might be full", frameCounter)
+					}
+				} else {
+					log.Printf("playAudioStream: OpusSend channel is nil, stopping playback")
+					break
+				}
 			}
 		}
 	}
@@ -3059,32 +3094,24 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 
-	// Kill the process if still running
+	// Force kill the process to ensure it's completely terminated and free RAM instantly
 	if cmd.Process != nil {
-		cmd.Process.Kill()
+		err := cmd.Process.Kill()
+		if err != nil {
+			log.Printf("playAudioStream: Error killing process: %v", err)
+		} else {
+			log.Printf("playAudioStream: Process killed successfully")
+		}
 	}
 
-	// The progressUpdaterCancel() is deferred earlier in the function
-	// It will be called automatically when the function exits
-
-	// Ensure we clean up any remaining resources
-	done := make(chan error, 1)
-	go func() {
-		if cmd.Process != nil {
-			done <- cmd.Wait()
-		} else {
-			done <- nil
-		}
-	}()
-
+	// Wait for the command to finish with a timeout to prevent hanging
 	select {
-	case <-time.After(3 * time.Second):
-		// Process hasn't finished in time, but we continue anyway
-		log.Println("Warning: Command took too long to finish, continuing...")
-	case err := <-done:
-		if err != nil {
-			log.Printf("Command finished with error: %v", err)
-		}
+	case <-cmdDone:
+		// Command finished normally
+		log.Println("playAudioStream: Command finished normally")
+	case <-time.After(2 * time.Second):
+		// Command didn't finish within timeout, but we continue anyway
+		log.Println("playAudioStream: Command didn't finish within timeout, continuing...")
 	}
 
 	return nil
