@@ -2048,11 +2048,17 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 						break
 					}
 				}
-				
+
 				if textChannelID != "" {
 					_, err := session.ChannelMessageSendEmbed(textChannelID, embed)
 					if err != nil {
-						log.Printf("Error sending progress update: %v", err)
+						// Check if the error is related to missing access
+						if strings.Contains(err.Error(), "Missing Access") || strings.Contains(err.Error(), "403") {
+							log.Printf("Missing access to send progress update: %v", err)
+							// Don't log this as a critical error since it's often due to lack of permissions
+						} else {
+							log.Printf("Error sending progress update: %v", err)
+						}
 					}
 				}
 			case <-progressUpdaterCtx.Done():
@@ -2204,11 +2210,29 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		cmd.Process.Kill()
 	}
 	
-	// Wait for process to finish
-	cmd.Wait()
-	
 	// The progressUpdaterCancel() is deferred earlier in the function
 	// It will be called automatically when the function exits
+	
+	// Ensure we clean up any remaining resources
+	done := make(chan error, 1)
+	go func() {
+		if cmd.Process != nil {
+			done <- cmd.Wait()
+		} else {
+			done <- nil
+		}
+	}()
+	
+	select {
+	case <-time.After(3 * time.Second):
+		// Process hasn't finished in time, but we continue anyway
+		log.Println("Warning: Command took too long to finish, continuing...")
+	case err := <-done:
+		if err != nil {
+			log.Printf("Command finished with error: %v", err)
+		}
+	}
+	
 	return nil
 }
 
