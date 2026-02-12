@@ -26,6 +26,11 @@ import (
 	"layeh.com/gopus"
 )
 
+// Helper function to create string pointers for Discord API
+func stringPtr(s string) *string {
+	return &s
+}
+
 // GuildContext holds the context for each guild
 type GuildContext struct {
 	VoiceConnection *discordgo.VoiceConnection
@@ -1731,15 +1736,137 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 
 	switch {
 	case strings.HasPrefix(buttonID, "pause_resume"):
-		// Toggle pause/resume
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "Pause/Resume functionality would be implemented here.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
+		// Defer the response immediately to prevent timeout
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
 		})
+		if err != nil {
+			log.Printf("Error deferring interaction for pause_resume: %v", err)
+			return
+		}
+		
+		// Toggle pause/resume functionality would be implemented here
+		// For now, just update the message with current status
+		go func() {
+			// Small delay to simulate processing
+			time.Sleep(100 * time.Millisecond)
+			
+			// Update the message with current track info
+			mutex.RLock()
+			guildCtx, exists := guildContexts[guildID]
+			var currentTrack *Track
+			if exists && guildCtx != nil {
+				currentTrack = guildCtx.CurrentTrack
+			}
+			mutex.RUnlock()
+			
+			if currentTrack != nil {
+				// Get user stats for the requester
+				statsMutex.RLock()
+				requesterStats, reqExists := userStats[currentTrack.RequesterID]
+				statsMutex.RUnlock()
+
+				requesterLevel := 0
+				if reqExists && requesterStats != nil {
+					requesterLevel = requesterStats.Level
+				}
+
+				embed := &discordgo.MessageEmbed{
+					Title:       "🎵 Now Playing",
+					Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "⏱️ Duration",
+							Value:  currentTrack.Duration,
+							Inline: true,
+						},
+						{
+							Name:   "👤 Uploaded by",
+							Value:  currentTrack.Uploader,
+							Inline: true,
+						},
+						{
+							Name:   "💝 Requested by",
+							Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
+							Inline: true,
+						},
+					},
+					Color: 0xff69b4, // Pink color for romantic feel
+				}
+
+				// Add thumbnail if available
+				if currentTrack.Thumbnail != "" {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: currentTrack.Thumbnail,
+					}
+				}
+
+				// Create buttons for controls
+				components := []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
+								Style: discordgo.PrimaryButton,
+								CustomID: "pause_resume_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
+								Style: discordgo.PrimaryButton,
+								CustomID: "skip_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
+								Style: discordgo.DangerButton,
+								CustomID: "stop_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
+								Style: discordgo.SecondaryButton,
+								CustomID: "loop_" + guildID,
+							},
+						},
+					},
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+								Style: discordgo.SuccessButton,
+								CustomID: "guard_room_" + guildID,
+							},
+						},
+					},
+				}
+
+				// Update the message with the new track info and buttons
+				_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Embeds:     &[]*discordgo.MessageEmbed{embed},
+					Components: &components,
+				})
+				if err != nil {
+					log.Printf("Error updating message after pause_resume: %v", err)
+				}
+			} else {
+				// If no track is playing, update with appropriate message
+				_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content:    stringPtr("No track is currently playing."),
+					Components: &[]discordgo.MessageComponent{},
+				})
+				if err != nil {
+					log.Printf("Error updating message after pause_resume: %v", err)
+				}
+			}
+		}()
 	case strings.HasPrefix(buttonID, "skip"):
+		// Defer the response immediately to prevent timeout
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		if err != nil {
+			log.Printf("Error deferring interaction for skip: %v", err)
+			return
+		}
+
 		// Skip the current track
 		mutex.Lock()
 		guildCtx, exists := guildContexts[guildID]
@@ -1784,55 +1911,346 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 			// Small delay to ensure cleanup is complete
 			time.Sleep(500 * time.Millisecond)
 			playNextTrack(s, guildID, voiceState.ChannelID)
+			
+			// Small delay to allow track to start
+			time.Sleep(200 * time.Millisecond)
+			
+			// Get the current track information for the updated message
+			mutex.RLock()
+			var nextTrack *Track
+			if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
+				nextTrack = guildCtx.CurrentTrack
+			}
+			mutex.RUnlock()
+
+			// Create updated embed with current track info and buttons
+			if nextTrack != nil {
+				// Get user stats for the requester
+				statsMutex.RLock()
+				requesterStats, reqExists := userStats[nextTrack.RequesterID]
+				statsMutex.RUnlock()
+
+				requesterLevel := 0
+				if reqExists && requesterStats != nil {
+					requesterLevel = requesterStats.Level
+				}
+
+				embed := &discordgo.MessageEmbed{
+					Title:       "🎵 Now Playing",
+					Description: fmt.Sprintf("[%s](%s)", nextTrack.Title, nextTrack.URL),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "⏱️ Duration",
+							Value:  nextTrack.Duration,
+							Inline: true,
+						},
+						{
+							Name:   "👤 Uploaded by",
+							Value:  nextTrack.Uploader,
+							Inline: true,
+						},
+						{
+							Name:   "💝 Requested by",
+							Value:  fmt.Sprintf("%s (Level %d)", nextTrack.RequesterUsername, requesterLevel),
+							Inline: true,
+						},
+					},
+					Color: 0xff69b4, // Pink color for romantic feel
+				}
+
+				// Add thumbnail if available
+				if nextTrack.Thumbnail != "" {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: nextTrack.Thumbnail,
+					}
+				}
+
+				// Create buttons for controls
+				components := []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
+								Style: discordgo.PrimaryButton,
+								CustomID: "pause_resume_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
+								Style: discordgo.PrimaryButton,
+								CustomID: "skip_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
+								Style: discordgo.DangerButton,
+								CustomID: "stop_" + guildID,
+							},
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
+								Style: discordgo.SecondaryButton,
+								CustomID: "loop_" + guildID,
+							},
+						},
+					},
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+								Style: discordgo.SuccessButton,
+								CustomID: "guard_room_" + guildID,
+							},
+						},
+					},
+				}
+
+				// Update the message with the new track info and buttons
+				_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Embeds:     &[]*discordgo.MessageEmbed{embed},
+					Components: &components,
+				})
+				if err != nil {
+					log.Printf("Error updating message after skip: %v", err)
+				}
+			} else {
+				// If no track is playing, update with appropriate message
+				_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+					Content:    stringPtr("Skipped the current track. No more tracks in queue."),
+					Components: &[]discordgo.MessageComponent{}, // Remove buttons when no track is playing
+				})
+				if err != nil {
+					log.Printf("Error updating message after skip: %v", err)
+				}
+			}
 		}()
-
-		// Get the current track information for the updated message
-		mutex.RLock()
-		var nextTrack *Track
-		if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
-			nextTrack = guildCtx.CurrentTrack
+	case strings.HasPrefix(buttonID, "stop"):
+		// Defer the response immediately to prevent timeout
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		if err != nil {
+			log.Printf("Error deferring interaction for stop: %v", err)
+			return
 		}
-		mutex.RUnlock()
 
-		// Create updated embed with current track info and buttons
-		if nextTrack != nil {
-			// Get user stats for the requester
-			statsMutex.RLock()
-			requesterStats, reqExists := userStats[nextTrack.RequesterID]
-			statsMutex.RUnlock()
-
-			requesterLevel := 0
-			if reqExists && requesterStats != nil {
-				requesterLevel = requesterStats.Level
+		// Stop playback and clear the queue in a goroutine
+		go func() {
+			// Stop playback and clear the queue
+			mutex.Lock()
+			guildCtx, exists := guildContexts[guildID]
+			if exists && guildCtx != nil && guildCtx.MusicQueue != nil {
+				guildCtx.MusicQueue.Tracks = nil
 			}
 
+			// Clear the current track from guild context
+			if exists && guildCtx != nil {
+				guildCtx.CurrentTrack = nil
+			}
+			mutex.Unlock()
+
+			// Stop the current audio stream by closing the OpusSend channel
+			if vc.OpusSend != nil {
+				// Create a temporary channel to drain any remaining data
+				go func() {
+					// Drain the OpusSend channel to prevent blocking
+					for {
+						select {
+						case _, ok := <-vc.OpusSend:
+							if !ok {
+								// Channel closed, exit goroutine
+								return
+							}
+						case <-time.After(100 * time.Millisecond):
+							// Timeout, exit goroutine
+							return
+						}
+					}
+				}()
+
+				// Close the OpusSend channel to stop the current stream
+				close(vc.OpusSend)
+				vc.OpusSend = nil
+			}
+
+			// Check if room guard mode is enabled before disconnecting
+			guardModeMutex.RLock()
+			shouldGuard := roomGuardMode[guildID]
+			guardModeMutex.RUnlock()
+
+			if !shouldGuard {
+				// Only disconnect if room guard mode is not enabled
+				vc.Disconnect()
+			}
+
+			// Small delay to ensure cleanup is complete
+			time.Sleep(100 * time.Millisecond)
+
+			// Create embed for stopped playback
 			embed := &discordgo.MessageEmbed{
-				Title:       "🎵 Now Playing",
-				Description: fmt.Sprintf("[%s](%s)", nextTrack.Title, nextTrack.URL),
+				Title:       "⏹️ Playback Stopped",
+				Description: "Playback has been stopped and queue cleared.",
 				Fields: []*discordgo.MessageEmbedField{
 					{
-						Name:   "⏱️ Duration",
-						Value:  nextTrack.Duration,
+						Name:   "Status",
+						Value:  "Stopped",
 						Inline: true,
 					},
 					{
-						Name:   "👤 Uploaded by",
-						Value:  nextTrack.Uploader,
-						Inline: true,
-					},
-					{
-						Name:   "💝 Requested by",
-						Value:  fmt.Sprintf("%s (Level %d)", nextTrack.RequesterUsername, requesterLevel),
+						Name:   "Queue",
+						Value:  "Cleared",
 						Inline: true,
 					},
 				},
-				Color: 0xff69b4, // Pink color for romantic feel
+				Color: 0xff0000, // Red color for stop
 			}
 
-			// Add thumbnail if available
-			if nextTrack.Thumbnail != "" {
-				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
-					URL: nextTrack.Thumbnail,
+			// Create buttons for controls (with skip and stop disabled since playback is stopped)
+			components := []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "pause_resume_" + guildID,
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "skip_" + guildID,
+							Disabled: true, // Disabled since no track is playing
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
+							Style: discordgo.DangerButton,
+							CustomID: "stop_" + guildID,
+							Disabled: true, // Disabled since already stopped
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
+							Style: discordgo.SecondaryButton,
+							CustomID: "loop_" + guildID,
+						},
+					},
+				},
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+							Style: discordgo.SuccessButton,
+							CustomID: "guard_room_" + guildID,
+						},
+					},
+				},
+			}
+
+			// Update the message with the new status
+			_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Embeds:     &[]*discordgo.MessageEmbed{embed},
+				Components: &components,
+			})
+			if err != nil {
+				log.Printf("Error updating message after stop: %v", err)
+			}
+		}()
+	case strings.HasPrefix(buttonID, "loop"):
+		// Defer the response immediately to prevent timeout
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		if err != nil {
+			log.Printf("Error deferring interaction for loop: %v", err)
+			return
+		}
+
+		// Toggle loop mode in a goroutine
+		go func() {
+			// Toggle loop mode
+			mutex.Lock()
+			guildCtx, exists := guildContexts[guildID]
+			if !exists {
+				guildCtx = &GuildContext{
+					MusicQueue: &MusicQueue{},
+				}
+				guildContexts[guildID] = guildCtx
+			}
+
+			if guildCtx.MusicQueue == nil {
+				guildCtx.MusicQueue = &MusicQueue{}
+			}
+
+			guildCtx.MusicQueue.Loop = !guildCtx.MusicQueue.Loop
+
+			status := "disabled"
+			if guildCtx.MusicQueue.Loop {
+				status = "enabled"
+			}
+			mutex.Unlock()
+
+			// Get the current track information for the updated message
+			mutex.RLock()
+			var currentTrack *Track
+			if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
+				currentTrack = guildCtx.CurrentTrack
+			}
+			mutex.RUnlock()
+
+			// Create embed with current track info and loop status
+			var embed *discordgo.MessageEmbed
+			if currentTrack != nil {
+				// Get user stats for the requester
+				statsMutex.RLock()
+				requesterStats, reqExists := userStats[currentTrack.RequesterID]
+				statsMutex.RUnlock()
+
+				requesterLevel := 0
+				if reqExists && requesterStats != nil {
+					requesterLevel = requesterStats.Level
+				}
+
+				embed = &discordgo.MessageEmbed{
+					Title:       "🎵 Now Playing",
+					Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "⏱️ Duration",
+							Value:  currentTrack.Duration,
+							Inline: true,
+						},
+						{
+							Name:   "👤 Uploaded by",
+							Value:  currentTrack.Uploader,
+							Inline: true,
+						},
+						{
+							Name:   "💝 Requested by",
+							Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
+						},
+						{
+							Name:   "🔄 Loop Mode",
+							Value:  fmt.Sprintf("%s", status),
+							Inline: true,
+						},
+					},
+					Color: 0xff69b4, // Pink color for romantic feel
+				}
+
+				// Add thumbnail if available
+				if currentTrack.Thumbnail != "" {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: currentTrack.Thumbnail,
+					}
+				}
+			} else {
+				// Create embed for when no track is playing
+				embed = &discordgo.MessageEmbed{
+					Title:       "🔄 Loop Mode Updated",
+					Description: fmt.Sprintf("Loop mode has been %s.", status),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "Status",
+							Value:  fmt.Sprintf("Loop %s", status),
+							Inline: true,
+						},
+					},
+					Color: 0x00ff00, // Green color
 				}
 			}
 
@@ -1873,412 +2291,165 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 				},
 			}
 
-			// Update the message with the new track info and buttons
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseUpdateMessage,
-				Data: &discordgo.InteractionResponseData{
-					Embeds:     []*discordgo.MessageEmbed{embed},
-					Components: components,
-				},
+			// Update the message with the new loop status
+			_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Embeds:     &[]*discordgo.MessageEmbed{embed},
+				Components: &components,
 			})
-		} else {
-			// If no track is playing, update with appropriate message
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseUpdateMessage,
-				Data: &discordgo.InteractionResponseData{
-					Content: "Skipped the current track. No more tracks in queue.",
-					Components: []discordgo.MessageComponent{}, // Remove buttons when no track is playing
-				},
-			})
-		}
-	case strings.HasPrefix(buttonID, "stop"):
-		// Stop playback and clear the queue
-		mutex.Lock()
-		guildCtx, exists := guildContexts[guildID]
-		if exists && guildCtx != nil && guildCtx.MusicQueue != nil {
-			guildCtx.MusicQueue.Tracks = nil
+			if err != nil {
+				log.Printf("Error updating message after loop: %v", err)
+			}
+		}()
+	case strings.HasPrefix(buttonID, "guard_room"):
+		// Defer the response immediately to prevent timeout
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		if err != nil {
+			log.Printf("Error deferring interaction for guard room: %v", err)
+			return
 		}
 
-		// Clear the current track from guild context
-		if exists && guildCtx != nil {
-			guildCtx.CurrentTrack = nil
-		}
-		mutex.Unlock()
+		// Toggle room guard mode in a goroutine
+		go func() {
+			// Toggle room guard mode
+			guardModeMutex.Lock()
+			currentMode, exists := roomGuardMode[guildID]
+			newMode := !currentMode // Toggle the current mode
+			if !exists {
+				newMode = true // Default to true if not previously set
+			}
+			roomGuardMode[guildID] = newMode
+			guardModeMutex.Unlock()
 
-		// Stop the current audio stream by closing the OpusSend channel
-		if vc.OpusSend != nil {
-			// Create a temporary channel to drain any remaining data
-			go func() {
-				// Drain the OpusSend channel to prevent blocking
-				for {
-					select {
-					case _, ok := <-vc.OpusSend:
-						if !ok {
-							// Channel closed, exit goroutine
-							return
-						}
-					case <-time.After(100 * time.Millisecond):
-						// Timeout, exit goroutine
-						return
+			modeStatus := "disabled"
+			if newMode {
+				modeStatus = "enabled"
+			}
+
+			// Get the current track information for the updated message
+			mutex.RLock()
+			guildCtxTemp, existsTemp := guildContexts[guildID]
+			var currentTrack *Track
+			if existsTemp && guildCtxTemp != nil && guildCtxTemp.CurrentTrack != nil {
+				currentTrack = guildCtxTemp.CurrentTrack
+			}
+			mutex.RUnlock()
+
+			// Create embed with current track info and guard mode status
+			var embed *discordgo.MessageEmbed
+			if currentTrack != nil {
+				// Get user stats for the requester
+				statsMutex.RLock()
+				requesterStats, exists := userStats[currentTrack.RequesterID]
+				statsMutex.RUnlock()
+
+				requesterLevel := 0
+				if exists && requesterStats != nil {
+					requesterLevel = requesterStats.Level
+				}
+
+				embed = &discordgo.MessageEmbed{
+					Title:       "🎵 Now Playing",
+					Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "⏱️ Duration",
+							Value:  currentTrack.Duration,
+							Inline: true,
+						},
+						{
+							Name:   "👤 Uploaded by",
+							Value:  currentTrack.Uploader,
+							Inline: true,
+						},
+						{
+							Name:   "💝 Requested by",
+							Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
+							Inline: true,
+						},
+						{
+							Name:   "🛡️ Guard Mode",
+							Value:  fmt.Sprintf("%s", modeStatus),
+							Inline: true,
+						},
+					},
+					Color: 0xff69b4, // Pink color for romantic feel
+				}
+
+				// Add thumbnail if available
+				if currentTrack.Thumbnail != "" {
+					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+						URL: currentTrack.Thumbnail,
 					}
 				}
-			}()
-
-			// Close the OpusSend channel to stop the current stream
-			close(vc.OpusSend)
-			vc.OpusSend = nil
-		}
-
-		// Check if room guard mode is enabled before disconnecting
-		guardModeMutex.RLock()
-		shouldGuard := roomGuardMode[guildID]
-		guardModeMutex.RUnlock()
-
-		if !shouldGuard {
-			// Only disconnect if room guard mode is not enabled
-			vc.Disconnect()
-		}
-
-		// Create embed for stopped playback
-		embed := &discordgo.MessageEmbed{
-			Title:       "⏹️ Playback Stopped",
-			Description: "Playback has been stopped and queue cleared.",
-			Fields: []*discordgo.MessageEmbedField{
-				{
-					Name:   "Status",
-					Value:  "Stopped",
-					Inline: true,
-				},
-				{
-					Name:   "Queue",
-					Value:  "Cleared",
-					Inline: true,
-				},
-			},
-			Color: 0xff0000, // Red color for stop
-		}
-
-		// Create buttons for controls (with skip and stop disabled since playback is stopped)
-		components := []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "pause_resume_" + guildID,
+			} else {
+				// Create embed for when no track is playing
+				embed = &discordgo.MessageEmbed{
+					Title:       "🛡️ Room Guard Mode Updated",
+					Description: fmt.Sprintf("Room guard mode has been %s.", modeStatus),
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "Status",
+							Value:  fmt.Sprintf("Guard %s", modeStatus),
+							Inline: true,
+						},
+						{
+							Name:   "Behavior",
+							Value:  fmt.Sprintf("Bot will %s stay in voice channel when idle", map[bool]string{true: "now", false: "no longer"}[newMode]),
+							Inline: true,
+						},
 					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "skip_" + guildID,
-						Disabled: true, // Disabled since no track is playing
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
-						Style: discordgo.DangerButton,
-						CustomID: "stop_" + guildID,
-						Disabled: true, // Disabled since already stopped
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
-						Style: discordgo.SecondaryButton,
-						CustomID: "loop_" + guildID,
-					},
-				},
-			},
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
-						Style: discordgo.SuccessButton,
-						CustomID: "guard_room_" + guildID,
-					},
-				},
-			},
-		}
-
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
-			Data: &discordgo.InteractionResponseData{
-				Embeds:     []*discordgo.MessageEmbed{embed},
-				Components: components,
-			},
-		})
-	case strings.HasPrefix(buttonID, "loop"):
-		// Toggle loop mode
-		mutex.Lock()
-		guildCtx, exists := guildContexts[guildID]
-		if !exists {
-			guildCtx = &GuildContext{
-				MusicQueue: &MusicQueue{},
-			}
-			guildContexts[guildID] = guildCtx
-		}
-
-		if guildCtx.MusicQueue == nil {
-			guildCtx.MusicQueue = &MusicQueue{}
-		}
-
-		guildCtx.MusicQueue.Loop = !guildCtx.MusicQueue.Loop
-
-		status := "disabled"
-		if guildCtx.MusicQueue.Loop {
-			status = "enabled"
-		}
-		mutex.Unlock()
-
-		// Get the current track information for the updated message
-		mutex.RLock()
-		var currentTrack *Track
-		if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
-			currentTrack = guildCtx.CurrentTrack
-		}
-		mutex.RUnlock()
-
-		// Create embed with current track info and loop status
-		var embed *discordgo.MessageEmbed
-		if currentTrack != nil {
-			// Get user stats for the requester
-			statsMutex.RLock()
-			requesterStats, reqExists := userStats[currentTrack.RequesterID]
-			statsMutex.RUnlock()
-
-			requesterLevel := 0
-			if reqExists && requesterStats != nil {
-				requesterLevel = requesterStats.Level
-			}
-
-			embed = &discordgo.MessageEmbed{
-				Title:       "🎵 Now Playing",
-				Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:   "⏱️ Duration",
-						Value:  currentTrack.Duration,
-						Inline: true,
-					},
-					{
-						Name:   "👤 Uploaded by",
-						Value:  currentTrack.Uploader,
-						Inline: true,
-					},
-					{
-						Name:   "💝 Requested by",
-						Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
-						Inline: true,
-					},
-					{
-						Name:   "🔄 Loop Mode",
-						Value:  fmt.Sprintf("%s", status),
-						Inline: true,
-					},
-				},
-				Color: 0xff69b4, // Pink color for romantic feel
-			}
-
-			// Add thumbnail if available
-			if currentTrack.Thumbnail != "" {
-				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
-					URL: currentTrack.Thumbnail,
+					Color: 0x00ff00, // Green color
 				}
 			}
-		} else {
-			// Create embed for when no track is playing
-			embed = &discordgo.MessageEmbed{
-				Title:       "🔄 Loop Mode Updated",
-				Description: fmt.Sprintf("Loop mode has been %s.", status),
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:   "Status",
-						Value:  fmt.Sprintf("Loop %s", status),
-						Inline: true,
+
+			// Create buttons for controls
+			components := []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "pause_resume_" + guildID,
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "skip_" + guildID,
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
+							Style: discordgo.DangerButton,
+							CustomID: "stop_" + guildID,
+						},
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
+							Style: discordgo.SecondaryButton,
+							CustomID: "loop_" + guildID,
+						},
 					},
 				},
-				Color: 0x00ff00, // Green color
-			}
-		}
-
-		// Create buttons for controls
-		components := []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "pause_resume_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "skip_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
-						Style: discordgo.DangerButton,
-						CustomID: "stop_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
-						Style: discordgo.SecondaryButton,
-						CustomID: "loop_" + guildID,
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+							Style: discordgo.SuccessButton,
+							CustomID: "guard_room_" + guildID,
+						},
 					},
 				},
-			},
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
-						Style: discordgo.SuccessButton,
-						CustomID: "guard_room_" + guildID,
-					},
-				},
-			},
-		}
-
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
-			Data: &discordgo.InteractionResponseData{
-				Embeds:     []*discordgo.MessageEmbed{embed},
-				Components: components,
-			},
-		})
-	case strings.HasPrefix(buttonID, "guard_room"):
-		// Toggle room guard mode
-		guardModeMutex.Lock()
-		currentMode, exists := roomGuardMode[guildID]
-		newMode := !currentMode // Toggle the current mode
-		if !exists {
-			newMode = true // Default to true if not previously set
-		}
-		roomGuardMode[guildID] = newMode
-		guardModeMutex.Unlock()
-
-		modeStatus := "disabled"
-		if newMode {
-			modeStatus = "enabled"
-		}
-
-		// Get the current track information for the updated message
-		mutex.RLock()
-		guildCtxTemp, existsTemp := guildContexts[guildID]
-		var currentTrack *Track
-		if existsTemp && guildCtxTemp != nil && guildCtxTemp.CurrentTrack != nil {
-			currentTrack = guildCtxTemp.CurrentTrack
-		}
-		mutex.RUnlock()
-
-		// Create embed with current track info and guard mode status
-		var embed *discordgo.MessageEmbed
-		if currentTrack != nil {
-			// Get user stats for the requester
-			statsMutex.RLock()
-			requesterStats, exists := userStats[currentTrack.RequesterID]
-			statsMutex.RUnlock()
-
-			requesterLevel := 0
-			if exists && requesterStats != nil {
-				requesterLevel = requesterStats.Level
 			}
 
-			embed = &discordgo.MessageEmbed{
-				Title:       "🎵 Now Playing",
-				Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:   "⏱️ Duration",
-						Value:  currentTrack.Duration,
-						Inline: true,
-					},
-					{
-						Name:   "👤 Uploaded by",
-						Value:  currentTrack.Uploader,
-						Inline: true,
-					},
-					{
-						Name:   "💝 Requested by",
-						Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
-						Inline: true,
-					},
-					{
-						Name:   "🛡️ Guard Mode",
-						Value:  fmt.Sprintf("%s", modeStatus),
-						Inline: true,
-					},
-				},
-				Color: 0xff69b4, // Pink color for romantic feel
+			// Update the message with the new guard mode status
+			_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Embeds:     &[]*discordgo.MessageEmbed{embed},
+				Components: &components,
+			})
+			if err != nil {
+				log.Printf("Error updating message after guard room toggle: %v", err)
 			}
-
-			// Add thumbnail if available
-			if currentTrack.Thumbnail != "" {
-				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
-					URL: currentTrack.Thumbnail,
-				}
-			}
-		} else {
-			// Create embed for when no track is playing
-			embed = &discordgo.MessageEmbed{
-				Title:       "🛡️ Room Guard Mode Updated",
-				Description: fmt.Sprintf("Room guard mode has been %s.", modeStatus),
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:   "Status",
-						Value:  fmt.Sprintf("Guard %s", modeStatus),
-						Inline: true,
-					},
-					{
-						Name:   "Behavior",
-						Value:  fmt.Sprintf("Bot will %s stay in voice channel when idle", map[bool]string{true: "now", false: "no longer"}[newMode]),
-						Inline: true,
-					},
-				},
-				Color: 0x00ff00, // Green color
-			}
-		}
-
-		// Create buttons for controls
-		components := []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "pause_resume_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
-						Style: discordgo.PrimaryButton,
-						CustomID: "skip_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
-						Style: discordgo.DangerButton,
-						CustomID: "stop_" + guildID,
-					},
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
-						Style: discordgo.SecondaryButton,
-						CustomID: "loop_" + guildID,
-					},
-				},
-			},
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
-						Style: discordgo.SuccessButton,
-						CustomID: "guard_room_" + guildID,
-					},
-				},
-			},
-		}
-
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
-			Data: &discordgo.InteractionResponseData{
-				Embeds:     []*discordgo.MessageEmbed{embed},
-				Components: components,
-			},
-		})
+		}()
 	}
 }
 
