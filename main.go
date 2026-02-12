@@ -31,41 +31,39 @@ type GuildContext struct {
 	VoiceConnection *discordgo.VoiceConnection
 	MusicQueue      *MusicQueue
 	CurrentTrack    *Track
-	StartTime       time.Time  // Time when the current track started playing
+	StartTime       time.Time // Time when the current track started playing
 }
 
 // TrackWithDuration extends Track with duration information in seconds
 type TrackWithDuration struct {
 	*Track
-	DurationSeconds int // Duration in seconds
+	DurationSeconds int       // Duration in seconds
 	StartTime       time.Time // Time when this track started playing
 }
 
-
-
 // Track represents a music track
 type Track struct {
-	Title       string
-	URL         string
-	Duration    string
-	Uploader    string
-	Thumbnail   string
-	RequesterID string
+	Title             string
+	URL               string
+	Duration          string
+	Uploader          string
+	Thumbnail         string
+	RequesterID       string
 	RequesterUsername string
 }
 
 // UserStats holds user statistics for the leveling system
 type UserStats struct {
-	LovePoints     int
-	Level          int
-	TotalMessages  int
-	LastActivity   time.Time
+	LovePoints          int
+	Level               int
+	TotalMessages       int
+	LastActivity        time.Time
 	CurrentSongRequests int
 }
 
 // Global variables for the leveling system
 var (
-	userStats = make(map[string]*UserStats)
+	userStats  = make(map[string]*UserStats)
 	statsMutex sync.RWMutex
 )
 
@@ -77,25 +75,25 @@ type MusicQueue struct {
 
 // SavedPlaylist represents a user's saved playlist
 type SavedPlaylist struct {
-	Name  string
+	Name   string
 	Tracks []*Track
 }
 
 // UserPreferences holds user-specific settings
 type UserPreferences struct {
-	Volume float64 // Volume level (0.0 to 1.0)
+	Volume         float64 // Volume level (0.0 to 1.0)
 	SavedPlaylists map[string]*SavedPlaylist
 }
 
 // Global variable for user preferences
 var (
 	userPreferences = make(map[string]*UserPreferences)
-	prefsMutex sync.RWMutex
+	prefsMutex      sync.RWMutex
 )
 
 // Global variable for room guard mode
 var (
-	roomGuardMode = make(map[string]bool) // Maps guildID to guard mode status
+	roomGuardMode  = make(map[string]bool) // Maps guildID to guard mode status
 	guardModeMutex sync.RWMutex
 )
 
@@ -109,17 +107,17 @@ type RateLimiter struct {
 func (rl *RateLimiter) AddRequest(userID string) {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	now := time.Now()
-	
+
 	// Initialize slice if needed
 	if rl.requests[userID] == nil {
 		rl.requests[userID] = make([]time.Time, 0)
 	}
-	
+
 	// Add current request
 	rl.requests[userID] = append(rl.requests[userID], now)
-	
+
 	// Remove requests older than 1 minute
 	cutoff := now.Add(-1 * time.Minute)
 	filtered := make([]time.Time, 0)
@@ -135,9 +133,9 @@ func (rl *RateLimiter) AddRequest(userID string) {
 func (rl *RateLimiter) IsLimited(userID string) bool {
 	rl.mutex.RLock()
 	defer rl.mutex.RUnlock()
-	
+
 	requests := rl.requests[userID]
-	
+
 	// Check if user has more than 5 requests in the last minute
 	return len(requests) > 5
 }
@@ -163,7 +161,7 @@ var (
 
 	// Allowed users for exclusive access
 	AllowedUsers map[string]bool
-	
+
 	// Rate limiter to prevent abuse
 	rateLimiter = &RateLimiter{
 		requests: make(map[string][]time.Time),
@@ -182,7 +180,7 @@ func main() {
 	if token == "" {
 		log.Fatal("DISCORD_TOKEN environment variable is not set")
 	}
-	
+
 	// Retrieve application ID from environment variable (optional)
 	appID := os.Getenv("APPLICATION_ID")
 	if appID == "" {
@@ -194,7 +192,7 @@ func main() {
 	if allowedUserIDs == "" {
 		log.Fatal("ALLOWED_USER_IDS environment variable is not set")
 	}
-	
+
 	// Parse the comma-separated user IDs
 	AllowedUsers = make(map[string]bool)
 	idParts := strings.Split(allowedUserIDs, ",")
@@ -223,7 +221,7 @@ func main() {
 	}
 
 	fmt.Println("Queen's Lɣre୨ৎ⭑ is now running. Press CTRL+C to exit.")
-	
+
 	// Register slash commands
 	registerCommands(appID)
 
@@ -318,6 +316,18 @@ func registerCommands(appID string) {
 					Type:        discordgo.ApplicationCommandOptionBoolean,
 					Name:        "enable",
 					Description: "Enable or disable room guard mode",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "oxide-search",
+			Description: "Search and play music from various platforms (YouTube, Spotify, SoundCloud, etc.)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "query",
+					Description: "Search query or URL",
 					Required:    true,
 				},
 			},
@@ -449,34 +459,53 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				if !exists || vc == nil {
 					// Auto-join voice channel if not already connected
 					log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
-					vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
-					if err != nil || vc == nil {
-						log.Printf("Error auto-joining voice channel: %v", err)
-						
+
+					// Retry mechanism for handling 4016 errors during voice connection
+					maxRetries := 3
+					retryCount := 0
+					var vc *discordgo.VoiceConnection
+					var err error
+
+					for retryCount < maxRetries {
+						vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
+						if err == nil && vc != nil {
+							// Success, break out of retry loop
+							break
+						}
+
 						// Check if the error is related to encryption mode
-						if err != nil && strings.Contains(err.Error(), "4016") {
-							log.Printf("Detected encryption mode error (4016), attempting reconnection...")
-							
-							// Wait a bit before retrying
+						if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
+							log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+							retryCount++
+
+							// Wait before retrying
 							time.Sleep(2 * time.Second)
-							
-							// Try to join again
-							vc, err = s.ChannelVoiceJoin(m.GuildID, voiceState.ChannelID, false, true)
-							if err != nil || vc == nil {
-								log.Printf("Second attempt to join voice channel failed: %v", err)
-								
-								s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel (error 4016). Coba lagi nanti!")
-								return
-							}
-						} else {
+
+							// Continue to next iteration to retry
+							continue
+						} else if err != nil {
+							// Different error, don't retry
+							log.Printf("Error auto-joining voice channel: %v", err)
 							s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel. Coba lagi nanti!")
 							return
+						} else if vc == nil {
+							// Voice connection is nil, retry
+							log.Printf("Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
+							retryCount++
+							time.Sleep(1 * time.Second)
+							continue
 						}
+					}
+
+					if vc == nil {
+						log.Printf("Failed to join voice channel after %d attempts", maxRetries)
+						s.ChannelMessageSend(m.ChannelID, "❌ Gagal join voice channel setelah beberapa percobaan. Coba lagi nanti!")
+						return
 					}
 
 					// Set log level to debug to see encryption details
 					vc.LogLevel = discordgo.LogDebug
-					
+
 					// Wait for the connection to be ready
 					for !vc.Ready {
 						time.Sleep(100 * time.Millisecond)
@@ -514,9 +543,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					// Create a more detailed "Now Playing" message
 					nowPlayingMessage := fmt.Sprintf(
 						"🎵 **Now Playing:** `%s`\n"+
-						"👤 **Requested by:** %s **(Level %d)**\n"+
-						"⏱️ **Duration:** %s\n"+
-						"💝 **Love Points:** %d",
+							"👤 **Requested by:** %s **(Level %d)**\n"+
+							"⏱️ **Duration:** %s\n"+
+							"💝 **Love Points:** %d",
 						track.Title,
 						m.Author.Username,
 						level,
@@ -532,18 +561,18 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 							Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
 							Fields: []*discordgo.MessageEmbedField{
 								{
-									Name:  "👤 Requested by",
-									Value: fmt.Sprintf("%s (Level %d)", m.Author.Username, level),
+									Name:   "👤 Requested by",
+									Value:  fmt.Sprintf("%s (Level %d)", m.Author.Username, level),
 									Inline: true,
 								},
 								{
-									Name:  "⏱️ Duration",
-									Value: track.Duration,
+									Name:   "⏱️ Duration",
+									Value:  track.Duration,
 									Inline: true,
 								},
 								{
-									Name:  "💝 Love Points",
-									Value: fmt.Sprintf("%d", lovePoints),
+									Name:   "💝 Love Points",
+									Value:  fmt.Sprintf("%d", lovePoints),
 									Inline: true,
 								},
 							},
@@ -558,23 +587,23 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 							discordgo.ActionsRow{
 								Components: []discordgo.MessageComponent{
 									discordgo.Button{
-										Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
-										Style: discordgo.PrimaryButton,
+										Emoji:    &discordgo.ComponentEmoji{Name: "⏯️"},
+										Style:    discordgo.PrimaryButton,
 										CustomID: "pause_resume_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
-										Style: discordgo.PrimaryButton,
+										Emoji:    &discordgo.ComponentEmoji{Name: "⏭️"},
+										Style:    discordgo.PrimaryButton,
 										CustomID: "skip_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: &discordgo.ComponentEmoji{Name: "🛑"},
-										Style: discordgo.DangerButton,
+										Emoji:    &discordgo.ComponentEmoji{Name: "🛑"},
+										Style:    discordgo.DangerButton,
 										CustomID: "stop_" + m.GuildID,
 									},
 									discordgo.Button{
-										Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
-										Style: discordgo.SecondaryButton,
+										Emoji:    &discordgo.ComponentEmoji{Name: "🔁"},
+										Style:    discordgo.SecondaryButton,
 										CustomID: "loop_" + m.GuildID,
 									},
 								},
@@ -582,8 +611,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 							discordgo.ActionsRow{
 								Components: []discordgo.MessageComponent{
 									discordgo.Button{
-										Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
-										Style: discordgo.SuccessButton,
+										Emoji:    &discordgo.ComponentEmoji{Name: "🛡️"},
+										Style:    discordgo.SuccessButton,
 										CustomID: "guard_room_" + m.GuildID,
 									},
 								},
@@ -674,6 +703,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			handleSlashLoadPlaylistCommand(s, i)
 		case "oxide-guardroom":
 			handleGuardRoomCommand(s, i)
+		case "oxide-search":
+			handleSearchCommand(s, i)
 		}
 	}
 	// Handle button interactions
@@ -687,7 +718,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	username := i.Member.User.Username
 	userID := i.Member.User.ID
 	log.Println("Perintah /play diterima dari: " + username)
-	
+
 	// Check rate limit
 	rateLimiter.AddRequest(userID)
 	if rateLimiter.IsLimited(userID) {
@@ -704,7 +735,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		return
 	}
-	
+
 	// Defer the response to prevent timeout - MUST BE DONE IN THE FIRST FEW MILLISECONDS
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -717,12 +748,12 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Get the query from options
 	query := i.ApplicationCommandData().Options[0].StringValue()
 	log.Printf("Processing query: %s", query)
-	
+
 	// Validate the URL to prevent command injection
 	sanitizedQuery := sanitizeURL(query)
 	if sanitizedQuery == "" {
 		log.Printf("Invalid URL provided by user %s: %s", username, query)
-		
+
 		// Use follow-up message to respond after defer
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "Invalid URL provided. Please provide a valid URL or search query.",
@@ -737,7 +768,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	voiceState, err := getVoiceState(s, i.Member.User.ID, i.GuildID)
 	if err != nil {
 		log.Printf("User %s not in voice channel: %v", username, err)
-		
+
 		// Use follow-up message to respond after defer
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "You must be connected to a voice channel to use this command.",
@@ -752,11 +783,11 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	log.Println("Sedang mencari lagu di YouTube...")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	
+
 	track, err := getYoutubeInfoWithContext(ctx, sanitizedQuery)
 	if err != nil {
 		log.Printf("Error getting track info: %v", err)
-		
+
 		// Use follow-up message to respond after defer with user-friendly error
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "❌ Maaf Bre, lagunya gagal diambil. Coba link lain atau judul yang lebih spesifik!",
@@ -766,7 +797,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		return
 	}
-	
+
 	// Set the requester
 	track.RequesterID = i.Member.User.ID
 	track.RequesterUsername = username
@@ -797,7 +828,7 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		return
 	}
-	
+
 	guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
 	mutex.Unlock()
 
@@ -808,31 +839,33 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if !exists || vc == nil {
 		// Auto-join voice channel if not already connected
 		log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
-		vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
-		if err != nil || vc == nil {
-			log.Printf("Error auto-joining voice channel: %v", err)
-
+		
+		// Retry mechanism for handling 4016 errors during voice connection
+		maxRetries := 3
+		retryCount := 0
+		var vc *discordgo.VoiceConnection
+		var err error
+		
+		for retryCount < maxRetries {
+			vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
+			if err == nil && vc != nil {
+				// Success, break out of retry loop
+				break
+			}
+			
 			// Check if the error is related to encryption mode
-			if err != nil && strings.Contains(err.Error(), "4016") {
-				log.Printf("Detected encryption mode error (4016), attempting reconnection...")
+			if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
+				log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+				retryCount++
 				
-				// Wait a bit before retrying
+				// Wait before retrying
 				time.Sleep(2 * time.Second)
 				
-				// Try to join again
-				vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
-				if err != nil || vc == nil {
-					log.Printf("Second attempt to join voice channel failed: %v", err)
-
-					_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-						Content: "❌ Gagal join voice channel (error 4016). Coba lagi nanti!",
-					})
-					if err != nil {
-						log.Printf("Error sending follow-up message: %v", err)
-					}
-					return
-				}
-			} else {
+				// Continue to next iteration to retry
+				continue
+			} else if err != nil {
+				// Different error, don't retry
+				log.Printf("Error auto-joining voice channel: %v", err)
 				_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 					Content: "❌ Gagal join voice channel. Coba lagi nanti!",
 				})
@@ -840,12 +873,29 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					log.Printf("Error sending follow-up message: %v", err)
 				}
 				return
+			} else if vc == nil {
+				// Voice connection is nil, retry
+				log.Printf("Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
+				retryCount++
+				time.Sleep(1 * time.Second)
+				continue
 			}
 		}
 		
+		if vc == nil {
+			log.Printf("Failed to join voice channel after %d attempts", maxRetries)
+			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Content: "❌ Gagal join voice channel setelah beberapa percobaan. Coba lagi nanti!",
+			})
+			if err != nil {
+				log.Printf("Error sending follow-up message: %v", err)
+			}
+			return
+		}
+
 		// Set log level to debug to see encryption details
 		vc.LogLevel = discordgo.LogDebug
-		
+
 		// Wait for the connection to be ready
 		for !vc.Ready {
 			time.Sleep(100 * time.Millisecond)
@@ -863,11 +913,11 @@ func handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		hasTrack = true
 	}
 	mutex.RUnlock()
-	
+
 	if !hasTrack {
 		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
 		playNextTrack(s, i.GuildID, voiceState.ChannelID)
-		
+
 		// Use follow-up message to respond after defer
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: fmt.Sprintf("Now playing: `%s`", track.Title),
@@ -962,7 +1012,7 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					}
 				}
 			}()
-			
+
 			// Close the OpusSend channel to stop the current stream
 			close(currentVc.OpusSend)
 			currentVc.OpusSend = nil
@@ -1032,7 +1082,7 @@ func handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		guildCtx.MusicQueue.Tracks = nil
 	}
 	mutex.Unlock()
-	
+
 	// Clear the current track from guild context
 	var tempGuildCtx *GuildContext
 	var tempExists bool
@@ -1061,7 +1111,7 @@ func handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				}
 			}
 		}()
-		
+
 		// Close the OpusSend channel to stop the current stream
 		close(vc.OpusSend)
 		vc.OpusSend = nil
@@ -1095,7 +1145,7 @@ func handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		tracks = guildCtx.MusicQueue.Tracks[:]
 	}
 	mutex.RUnlock()
-	
+
 	if !queueExists || len(tracks) == 0 {
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "The queue is empty.",
@@ -1112,7 +1162,7 @@ func handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	for idx, track := range tracks {
 		queueMsg.WriteString(fmt.Sprintf("%d. %s - Requested by %s\n", idx+1, track.Title, track.RequesterUsername))
 	}
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: queueMsg.String(),
 	})
@@ -1139,7 +1189,7 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 	hasTrack := currentTrack != nil
 	mutex.RUnlock()
-	
+
 	if !hasTrack {
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "Nothing is currently playing.",
@@ -1154,7 +1204,7 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 	statsMutex.RLock()
 	requesterStats, exists := userStats[currentTrack.RequesterID]
 	statsMutex.RUnlock()
-	
+
 	requesterLevel := 0
 	if exists && requesterStats != nil {
 		requesterLevel = requesterStats.Level
@@ -1165,18 +1215,18 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		Description: fmt.Sprintf("[%s](%s)", currentTrack.Title, currentTrack.URL),
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name:  "⏱️ Duration",
-				Value: currentTrack.Duration,
+				Name:   "⏱️ Duration",
+				Value:  currentTrack.Duration,
 				Inline: true,
 			},
 			{
-				Name:  "👤 Uploaded by",
-				Value: currentTrack.Uploader,
+				Name:   "👤 Uploaded by",
+				Value:  currentTrack.Uploader,
 				Inline: true,
 			},
 			{
-				Name:  "💝 Requested by",
-				Value: fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
+				Name:   "💝 Requested by",
+				Value:  fmt.Sprintf("%s (Level %d)", currentTrack.RequesterUsername, requesterLevel),
 				Inline: true,
 			},
 		},
@@ -1195,23 +1245,23 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
-					Emoji: &discordgo.ComponentEmoji{Name: "⏯️"},
-					Style: discordgo.PrimaryButton,
+					Emoji:    &discordgo.ComponentEmoji{Name: "⏯️"},
+					Style:    discordgo.PrimaryButton,
 					CustomID: "pause_resume_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: &discordgo.ComponentEmoji{Name: "⏭️"},
-					Style: discordgo.PrimaryButton,
+					Emoji:    &discordgo.ComponentEmoji{Name: "⏭️"},
+					Style:    discordgo.PrimaryButton,
 					CustomID: "skip_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: &discordgo.ComponentEmoji{Name: "⏹️"},
-					Style: discordgo.DangerButton,
+					Emoji:    &discordgo.ComponentEmoji{Name: "⏹️"},
+					Style:    discordgo.DangerButton,
 					CustomID: "stop_" + i.GuildID,
 				},
 				discordgo.Button{
-					Emoji: &discordgo.ComponentEmoji{Name: "🔁"},
-					Style: discordgo.SecondaryButton,
+					Emoji:    &discordgo.ComponentEmoji{Name: "🔁"},
+					Style:    discordgo.SecondaryButton,
 					CustomID: "loop_" + i.GuildID,
 				},
 			},
@@ -1219,8 +1269,8 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
-					Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
-					Style: discordgo.SuccessButton,
+					Emoji:    &discordgo.ComponentEmoji{Name: "🛡️"},
+					Style:    discordgo.SuccessButton,
 					CustomID: "guard_room_" + i.GuildID,
 				},
 			},
@@ -1249,7 +1299,7 @@ func handleSlashVolumeCommand(s *discordgo.Session, i *discordgo.InteractionCrea
 
 	// Get the volume level from options
 	volume := i.ApplicationCommandData().Options[0].IntValue()
-	
+
 	if volume < 0 || volume > 100 {
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: "Volume harus antara 0-100.",
@@ -1259,13 +1309,13 @@ func handleSlashVolumeCommand(s *discordgo.Session, i *discordgo.InteractionCrea
 		}
 		return
 	}
-	
+
 	// Convert to 0.0-1.0 scale
 	volumeFloat := float64(volume) / 100.0
-	
+
 	prefs := getOrCreateUserPrefs(i.Member.User.ID)
 	prefs.Volume = volumeFloat
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("🔊 Volume diatur ke %d%%", volume),
 	})
@@ -1287,11 +1337,11 @@ func handleSlashSavePlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 	// Get the playlist name and track URL from options
 	playlistName := i.ApplicationCommandData().Options[0].StringValue()
 	trackURL := i.ApplicationCommandData().Options[1].StringValue()
-	
+
 	// Get track info
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	track, err := getYoutubeInfoWithContext(ctx, trackURL)
 	if err != nil {
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
@@ -1302,20 +1352,20 @@ func handleSlashSavePlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 		}
 		return
 	}
-	
+
 	prefs := getOrCreateUserPrefs(i.Member.User.ID)
-	
+
 	playlist, exists := prefs.SavedPlaylists[playlistName]
 	if !exists {
 		playlist = &SavedPlaylist{
-			Name: playlistName,
+			Name:   playlistName,
 			Tracks: make([]*Track, 0),
 		}
 		prefs.SavedPlaylists[playlistName] = playlist
 	}
-	
+
 	playlist.Tracks = append(playlist.Tracks, track)
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("🎵 Lagu '%s' telah ditambahkan ke playlist '%s'", track.Title, playlistName),
 	})
@@ -1336,7 +1386,7 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 
 	// Get the playlist name from options
 	playlistName := i.ApplicationCommandData().Options[0].StringValue()
-	
+
 	prefs := getOrCreateUserPrefs(i.Member.User.ID)
 	playlist, exists := prefs.SavedPlaylists[playlistName]
 	if !exists {
@@ -1348,7 +1398,7 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 		}
 		return
 	}
-	
+
 	// Add all tracks in the playlist to the music queue
 	mutex.Lock()
 	guildCtx, exists := guildContexts[i.GuildID]
@@ -1358,13 +1408,13 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 		}
 		guildContexts[i.GuildID] = guildCtx
 	}
-	
+
 	if guildCtx.MusicQueue == nil {
 		guildCtx.MusicQueue = &MusicQueue{}
 	}
-	
+
 	// Check if the queue has space for all tracks
-	if len(guildCtx.MusicQueue.Tracks) + len(playlist.Tracks) > MaxQueueSize {
+	if len(guildCtx.MusicQueue.Tracks)+len(playlist.Tracks) > MaxQueueSize {
 		mutex.Unlock()
 		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 			Content: fmt.Sprintf("❌ Tidak cukup ruang dalam antrean! Maksimal %d lagu dalam antrean. Playlist memiliki %d lagu.", MaxQueueSize, len(playlist.Tracks)),
@@ -1374,13 +1424,13 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 		}
 		return
 	}
-	
+
 	// Add all tracks from the playlist to the queue
 	for _, track := range playlist.Tracks {
 		guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
 	}
 	mutex.Unlock()
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("🎵 Playlist '%s' dengan %d lagu telah ditambahkan ke antrean.", playlistName, len(playlist.Tracks)),
 	})
@@ -1401,17 +1451,17 @@ func handleGuardRoomCommand(s *discordgo.Session, i *discordgo.InteractionCreate
 
 	// Get the enable option
 	enable := i.ApplicationCommandData().Options[0].BoolValue()
-	
+
 	// Set the room guard mode for this guild
 	guardModeMutex.Lock()
 	roomGuardMode[i.GuildID] = enable
 	guardModeMutex.Unlock()
-	
+
 	status := "disabled"
 	if enable {
 		status = "enabled"
 	}
-	
+
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("🛡️ Room guard mode %s. Bot will %s stay in voice channel when idle.", status, map[bool]string{true: "now", false: "no longer"}[enable]),
 	})
@@ -1461,7 +1511,7 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		})
 		return
 	}
-	
+
 	// Check if the user is in the same voice channel as the bot
 	voiceState, err := getVoiceState(s, i.Member.User.ID, guildID)
 	if err != nil {
@@ -1541,7 +1591,7 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 						}
 					}
 				}()
-				
+
 				// Close the OpusSend channel to stop the current stream
 				close(currentVc.OpusSend)
 				currentVc.OpusSend = nil
@@ -1590,12 +1640,12 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 					}
 				}
 			}()
-			
+
 			// Close the OpusSend channel to stop the current stream
 			close(vc.OpusSend)
 			vc.OpusSend = nil
 		}
-		
+
 		vc.Disconnect()
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -1637,18 +1687,18 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 		// Toggle room guard mode
 		guardModeMutex.Lock()
 		currentMode, exists := roomGuardMode[guildID]
-		newMode := !currentMode  // Toggle the current mode
+		newMode := !currentMode // Toggle the current mode
 		if !exists {
-			newMode = true  // Default to true if not previously set
+			newMode = true // Default to true if not previously set
 		}
 		roomGuardMode[guildID] = newMode
 		guardModeMutex.Unlock()
-		
+
 		modeStatus := "disabled"
 		if newMode {
 			modeStatus = "enabled"
 		}
-		
+
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
@@ -1661,37 +1711,37 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 // getYoutubeInfoWithContext gets video info using yt-dlp with context timeout
 func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) {
 	log.Printf("getYoutubeInfo: Processing URL: %s", url)
-	
+
 	// Sanitize the URL to prevent command injection
 	sanitizedURL := sanitizeURL(url)
 	if sanitizedURL == "" {
 		log.Printf("getYoutubeInfo: Invalid URL provided: %s", url)
 		return nil, fmt.Errorf("invalid URL provided")
 	}
-	
+
 	log.Printf("getYoutubeInfo: Sanitized URL: %s", sanitizedURL)
-	
+
 	// Create the command with context and additional flags
-	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp", 
-		"--dump-json", 
-		"-f", "bestaudio", 
-		"--no-check-certificate", 
-		"--no-warnings", 
-		"--flat-playlist", 
+	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp",
+		"--dump-json",
+		"-f", "bestaudio",
+		"--no-check-certificate",
+		"--no-warnings",
+		"--flat-playlist",
 		"-4", // Force IPv4
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
 		sanitizedURL)
-	
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
-	
+
 	err := cmd.Run()
 	if err != nil {
 		stderrContent := stderrBuf.String()
 		log.Printf("getYoutubeInfo: Error getting video info from yt-dlp: %v", err)
 		log.Println("getYoutubeInfo: yt-dlp stderr: " + stderrContent) // Print detailed error to log
-		
+
 		// Check for specific error conditions
 		if strings.Contains(stderrContent, "Unsupported URL") {
 			return nil, fmt.Errorf("unsupported URL: %s", sanitizedURL)
@@ -1702,50 +1752,50 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 		} else if strings.Contains(stderrContent, "This live event will begin in") {
 			return nil, fmt.Errorf("scheduled live event: %s", sanitizedURL)
 		}
-		
+
 		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
 	}
-	
+
 	output := stdoutBuf.Bytes()
-	
+
 	// Validate output before parsing JSON
 	if len(output) == 0 {
 		log.Printf("getYoutubeInfo: Empty output from yt-dlp")
 		return nil, fmt.Errorf("empty output from yt-dlp for URL: %s", sanitizedURL)
 	}
-	
+
 	// Check if output starts with unexpected character (like 'h')
 	if len(output) > 0 && output[0] != '{' {
 		outputStr := string(output)
 		log.Printf("getYoutubeInfo: Unexpected output format, starts with: '%c', full output: %s", output[0], outputStr)
 		return nil, fmt.Errorf("unexpected output format from yt-dlp: %s", outputStr)
 	}
-	
+
 	var info struct {
-		Title     string `json:"title"`
-		Duration  float64 `json:"duration"`
-		Uploader  string `json:"uploader"`
-		Thumbnail string `json:"thumbnail"`
-		WebpageURL string `json:"webpage_url"`
+		Title      string  `json:"title"`
+		Duration   float64 `json:"duration"`
+		Uploader   string  `json:"uploader"`
+		Thumbnail  string  `json:"thumbnail"`
+		WebpageURL string  `json:"webpage_url"`
 	}
-	
+
 	if err := json.Unmarshal(output, &info); err != nil {
 		log.Printf("getYoutubeInfo: Error parsing video info JSON: %v", err)
 		log.Printf("getYoutubeInfo: Raw output was: %s", string(output))
 		return nil, fmt.Errorf("error parsing video info: %v", err)
 	}
-	
+
 	// Validate that we got meaningful data
 	if info.Title == "" {
 		return nil, fmt.Errorf("could not retrieve title for URL: %s", sanitizedURL)
 	}
-	
+
 	// Format duration
 	durationStr := formatDuration(info.Duration)
-	
+
 	log.Printf("yt-dlp berhasil dapet link: " + info.WebpageURL)
 	log.Printf("getYoutubeInfo: Successfully retrieved info for '%s'", info.Title)
-	
+
 	return &Track{
 		Title:     info.Title,
 		URL:       info.WebpageURL,
@@ -1797,12 +1847,12 @@ func formatDuration(seconds float64) string {
 	if seconds <= 0 {
 		return "Live"
 	}
-	
+
 	totalSeconds := int(seconds)
 	hours := totalSeconds / 3600
 	minutes := (totalSeconds % 3600) / 60
 	secs := totalSeconds % 60
-	
+
 	if hours > 0 {
 		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
 	}
@@ -1819,20 +1869,20 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	}()
 
 	log.Printf("playAudioStream: Starting to play audio for guild %s, URL: %s, requested by: %s", guildID, url, requesterUsername)
-	
+
 	// Perform nil check on voice connection
 	if vc == nil {
 		log.Printf("playAudioStream: Voice connection is nil")
 		return fmt.Errorf("voice connection is nil")
 	}
-	
+
 	// Sanitize the URL
 	sanitizedURL := sanitizeURL(url)
 	if sanitizedURL == "" {
 		log.Printf("playAudioStream: Invalid URL provided: %s", url)
 		return fmt.Errorf("invalid URL provided: %s", url)
 	}
-	
+
 	// First, get the direct URL using yt-dlp
 	getUrlCmd := exec.Command("/usr/bin/yt-dlp", "--get-url", "-f", "bestaudio", "--no-check-certificate", "--no-warnings", "--no-playlist", "--", sanitizedURL)
 	urlOutput, err := getUrlCmd.Output()
@@ -1844,31 +1894,31 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		return fmt.Errorf("error getting direct URL from yt-dlp: %w", err)
 	}
-	
+
 	directURL := strings.TrimSpace(string(urlOutput))
 	log.Printf("playAudioStream: Got direct URL: %s", directURL)
-	
+
 	// Get user's volume preference
 	prefs := getOrCreateUserPrefs(requesterUsername)
 	volume := prefs.Volume
-	
+
 	// Create the ffmpeg command with the direct URL and volume adjustment
 	// Using exact args for Discord audio: -f s16le -ar 48000 -ac 2 pipe:1
-	cmd := exec.Command("ffmpeg", 
-		"-reconnect", "1", 
-		"-reconnect_streamed", "1", 
+	cmd := exec.Command("ffmpeg",
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
-		"-i", directURL, 
+		"-i", directURL,
 		"-filter:a", fmt.Sprintf("volume=%.2f", volume), // Apply user's volume preference
-		"-f", "s16le", 
-		"-ar", "48000", 
-		"-ac", "2", 
+		"-f", "s16le",
+		"-ar", "48000",
+		"-ac", "2",
 		"-loglevel", "error", // Show only errors
 		"pipe:1")
-	
+
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
-	
+
 	ffmpegOut, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Printf("playAudioStream: Error creating ffmpeg output pipe: %v", err)
@@ -1880,7 +1930,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		log.Printf("playAudioStream: Error starting ffmpeg: %v", err)
 		return fmt.Errorf("error starting ffmpeg: %w", err)
 	}
-	
+
 	// Read stderr in a goroutine to capture FFmpeg errors
 	go func() {
 		// Recover from panic in goroutine
@@ -1889,7 +1939,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				log.Printf("Recovered from panic in ffmpeg stderr reader: %v", r)
 			}
 		}()
-		
+
 		// Continuously read stderr to prevent blocking
 		scannerErr := bufio.NewScanner(&stderrBuf)
 		for scannerErr.Scan() {
@@ -1897,31 +1947,31 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			log.Printf("FFmpeg: %s", line)
 		}
 	}()
-	
+
 	// Create a reader from the stdout pipe
 	reader := bufio.NewReader(ffmpegOut)
-	
+
 	// Wait for the voice connection to be ready
 	for vc != nil && !vc.Ready {
 		time.Sleep(10 * time.Millisecond)
 	}
-	
+
 	// Check if voice connection is ready before proceeding
 	if vc == nil || !vc.Ready {
 		log.Println("playAudioStream: Voice connection is not ready")
 		return fmt.Errorf("voice connection is not ready")
 	}
-	
+
 	// Initialize Opus encoder
 	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		log.Printf("playAudioStream: Error creating Opus encoder: %v", err)
 		return fmt.Errorf("error creating Opus encoder: %w", err)
 	}
-	
+
 	// Set bit rate
 	enc.SetBitrate(128 * 1000) // 128kbps
-	
+
 	// Get the guild context to update the start time
 	mutex.Lock()
 	guildCtx, exists := guildContexts[guildID]
@@ -1931,16 +1981,16 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 		guildContexts[guildID] = guildCtx
 	}
-	
+
 	if guildCtx != nil {
 		guildCtx.StartTime = time.Now()
 	}
 	mutex.Unlock()
-	
+
 	// Start a goroutine to update the "Now Playing" message with progress bar
 	progressUpdaterCtx, progressUpdaterCancel := context.WithCancel(context.Background())
 	defer progressUpdaterCancel()
-	
+
 	go func() {
 		// Recover from panic in goroutine
 		defer func() {
@@ -1949,10 +1999,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				log.Printf("Stack trace:\n%s", debug.Stack())
 			}
 		}()
-		
+
 		ticker := time.NewTicker(5 * time.Second) // Update every 5 seconds
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ticker.C:
@@ -1964,7 +2014,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					continue
 				}
 				elapsed := int(time.Since(guildCtx.StartTime).Seconds())
-				
+
 				// Get track duration
 				trackDuration := 0
 				if guildCtx.CurrentTrack != nil && guildCtx.CurrentTrack.Duration != "" {
@@ -1981,17 +2031,17 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					}
 				}
 				mutex.RUnlock()
-				
+
 				// Create progress bar
 				progressBar := createProgressBar(elapsed, trackDuration)
-				
+
 				// Format time display
 				elapsedFormatted := formatTime(elapsed)
 				totalFormatted := formatTime(trackDuration)
-				
+
 				// Get the current track information
 				var currentTrackTitle, currentTrackUploader, currentTrackRequester, currentTrackThumbnail string
-				
+
 				mutex.RLock()
 				guildCtx, exists = guildContexts[guildID]
 				if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
@@ -2002,44 +2052,44 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					currentTrackThumbnail = currentTrack.Thumbnail
 				}
 				mutex.RUnlock()
-				
+
 				// Create embed with progress information
 				embed := &discordgo.MessageEmbed{
 					Title:       "🎵 Now Playing",
 					Description: fmt.Sprintf("[%s](%s)", currentTrackTitle, ""),
 					Fields: []*discordgo.MessageEmbedField{
 						{
-							Name:  "⏱️ Progress",
-							Value: fmt.Sprintf("`%s / %s`\n%s", elapsedFormatted, totalFormatted, progressBar),
+							Name:   "⏱️ Progress",
+							Value:  fmt.Sprintf("`%s / %s`\n%s", elapsedFormatted, totalFormatted, progressBar),
 							Inline: false,
 						},
 						{
-							Name:  "👤 Uploader",
-							Value: currentTrackUploader,
+							Name:   "👤 Uploader",
+							Value:  currentTrackUploader,
 							Inline: true,
 						},
 						{
-							Name:  "💝 Requested by",
-							Value: currentTrackRequester,
+							Name:   "💝 Requested by",
+							Value:  currentTrackRequester,
 							Inline: true,
 						},
 					},
 					Color: 0x00ff00, // Green color
 				}
-				
+
 				// Add thumbnail if available
 				if currentTrackThumbnail != "" {
 					embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
 						URL: currentTrackThumbnail,
 					}
 				}
-				
+
 				// Get the guild to find a text channel to send the update
 				guild, err := session.State.Guild(guildID)
 				if err != nil {
 					continue
 				}
-				
+
 				// Find a text channel to send the progress update
 				var textChannelID string
 				for _, channel := range guild.Channels {
@@ -2067,22 +2117,22 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			}
 		}
 	}()
-	
+
 	// Ensure encryption mode is properly set before sending audio
 	if vc != nil {
 		// Set log level to debug to see encryption details
 		vc.LogLevel = discordgo.LogDebug
-		
+
 		// Check and potentially set the encryption mode for compatibility
 		// This addresses the "Unknown encryption mode" error (4016)
 		// The voice connection should automatically negotiate the encryption mode,
 		// but we'll ensure it's properly initialized
-		
+
 		vc.Speaking(true)
 		// Add delay to allow Discord to prepare for audio
 		time.Sleep(1 * time.Second)
 	}
-	
+
 	defer func() {
 		if vc != nil {
 			vc.Speaking(false)
@@ -2094,7 +2144,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			guildCtx.CurrentTrack = nil
 		}
 		mutex.Unlock()
-		
+
 		// Play the next track if available and connection still exists
 		if vc != nil {
 			// We need to get the guildID from the voice connection or guild contexts
@@ -2106,7 +2156,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					break
 				}
 			}
-			
+
 			if guildID == "" {
 				// If we still can't determine the guildID, try to get it from the guild contexts
 				mutex.RLock()
@@ -2118,36 +2168,36 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				}
 				mutex.RUnlock()
 			}
-			
+
 			if guildID != "" {
 				playNextTrack(session, guildID, vc.ChannelID)
 			}
 		}
 	}()
-	
+
 	// Buffer for audio frames - exact size for stereo 16-bit PCM
 	pcmBuf := make([]int16, 960*2) // 960 samples * 2 channels
-	
+
 	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	frameCounter := 0
-	
+
 	for vc != nil && vc.Ready && vc.OpusSend != nil {
 		// Check if the voice connection is still active
 		if vc == nil || !vc.Ready {
 			log.Println("playAudioStream: Voice connection is nil or not ready")
 			break
 		}
-		
+
 		// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
 		audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
 		n, err := io.ReadFull(reader, audioBytes)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				log.Println("playAudioStream: End of audio stream reached")
-				
+
 				// Handle end of stream - check if connection still exists before continuing
 				if vc != nil {
 					log.Println("playAudioStream: Checking connection after end of stream")
@@ -2157,7 +2207,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			log.Printf("playAudioStream: Error reading audio: %v", err)
 			continue
 		}
-		
+
 		if n > 0 && vc != nil && vc.OpusSend != nil {
 			// Convert bytes to int16 samples
 			for i := 0; i < n/2; i++ {
@@ -2183,7 +2233,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				log.Println("playAudioStream: Voice connection lost, stopping playback")
 				break
 			}
-			
+
 			// Strict nil check before sending the encoded Opus frame to Discord
 			if vc.OpusSend != nil {
 				// Ensure compatibility with AEAD encryption modes required by Discord
@@ -2249,7 +2299,7 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		log.Println("Error: guildID kosong, membatalkan playback.")
 		return
 	}
-	
+
 	// Recover from panic with stack trace
 	defer func() {
 		if r := recover(); r != nil {
@@ -2307,7 +2357,7 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		guardModeMutex.RLock()
 		shouldGuard := roomGuardMode[guildID]
 		guardModeMutex.RUnlock()
-		
+
 		if shouldGuard {
 			// Room guard mode is enabled, keep the connection alive
 			return
@@ -2347,34 +2397,52 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	mutex.Unlock() // Unlock after updating the queue
 
 	// Connect to voice channel if not already connected
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
-	if err != nil || vc == nil {
-		log.Printf("playNextTrack: Error joining voice channel: %v", err)
-		
+	// Retry mechanism for handling 4016 errors during voice connection
+	maxRetries := 3
+	retryCount := 0
+	var vc *discordgo.VoiceConnection
+	var err error
+
+	for retryCount < maxRetries {
+		vc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
+		if err == nil && vc != nil {
+			// Success, break out of retry loop
+			break
+		}
+
 		// Check if the error is related to encryption mode
-		if err != nil && strings.Contains(err.Error(), "4016") {
-			log.Printf("Detected encryption mode error (4016), attempting reconnection...")
-			
-			// Wait a bit before retrying
+		if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
+			log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+			retryCount++
+
+			// Wait before retrying
 			time.Sleep(2 * time.Second)
-			
-			// Try to join again
-			vc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
-			if err != nil || vc == nil {
-				log.Printf("playNextTrack: Second attempt to join voice channel failed: %v", err)
-				return
-			}
-		} else {
+
+			// Continue to next iteration to retry
+			continue
+		} else if err != nil {
+			// Different error, don't retry
 			log.Printf("playNextTrack: Error joining voice channel: %v", err)
 			return
+		} else if vc == nil {
+			// Voice connection is nil, retry
+			log.Printf("playNextTrack: Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
+			retryCount++
+			time.Sleep(1 * time.Second)
+			continue
 		}
+	}
+
+	if vc == nil {
+		log.Printf("playNextTrack: Failed to join voice channel after %d attempts", maxRetries)
+		return
 	}
 
 	// Store the voice connection in the guild context
 	mutex.Lock()
 	guildCtx.VoiceConnection = vc
 	mutex.Unlock()
-	
+
 	// Set log level to debug to see encryption details
 	vc.LogLevel = discordgo.LogDebug
 
@@ -2384,24 +2452,24 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		// Initialize OpusSend channel if not already done
 		vc.OpusSend = make(chan []byte, 2)
 	}
-	
+
 	// Explicitly set the encryption mode to the standard one if needed
 	// This helps address the "Unknown encryption mode" error (4016)
-	
+
 	// Handle encryption mode for Discord's requirements
 	// This addresses the "Unknown encryption mode" error (4016)
 	// Wait for the voice connection to be ready
 	for i := 0; i < 50 && !vc.Ready; i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	// Log that we're ready to connect
 	if !vc.Ready {
 		log.Println("Warning: Voice connection is not ready, this may cause issues")
 	} else {
 		log.Println("Voice connection is ready")
 	}
-	
+
 	// Additional check for encryption mode compatibility
 	// In newer versions of discordgo, the encryption mode should be handled automatically
 	// But we ensure that we're using the standard mode
@@ -2478,21 +2546,21 @@ connectionReady:
 					// Success, break out of retry loop
 					break
 				}
-				
+
 				// Check if the error is related to encryption mode
 				if strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") {
 					log.Printf("Encryption error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
 					retryCount++
-					
+
 					// Disconnect and reconnect
 					vc.Disconnect()
 					time.Sleep(1 * time.Second)
-					
+
 					// Rejoin voice channel
 					newVc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 					if err != nil || newVc == nil {
 						log.Printf("Failed to rejoin voice channel: %v", err)
-						
+
 						// Check if the error is related to encryption mode
 						if err != nil && strings.Contains(err.Error(), "4016") {
 							log.Printf("Detected encryption mode error (4016) during rejoin, waiting before next attempt...")
@@ -2501,23 +2569,23 @@ connectionReady:
 						}
 						break
 					}
-					
+
 					// Update the voice connection in the guild context
 					mutex.Lock()
 					guildCtx.VoiceConnection = newVc
 					mutex.Unlock()
-					
+
 					// Set log level to debug to see encryption details
 					newVc.LogLevel = discordgo.LogDebug
-					
+
 					// Wait for the connection to be ready
 					for i := 0; i < 50 && !newVc.Ready; i++ {
 						time.Sleep(100 * time.Millisecond)
 					}
-					
+
 					// Update vc reference for the next iteration
 					vc = newVc
-					
+
 					// Wait a bit before retrying
 					time.Sleep(2 * time.Second)
 				} else {
@@ -2526,13 +2594,295 @@ connectionReady:
 					break
 				}
 			}
-			
+
 			if retryCount >= maxRetries {
 				log.Printf("Failed to play audio after %d retries due to encryption errors", maxRetries)
 			}
 		}(nextTrack) // Pass nextTrack as argument to the goroutine
 	} else {
 		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v", vc != nil, vc != nil && vc.Ready)
+	}
+}
+
+// handleSearchCommand handles the search command
+func handleSearchCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		log.Printf("Error deferring interaction: %v", err)
+		return
+	}
+
+	// Get the query from options
+	query := i.ApplicationCommandData().Options[0].StringValue()
+	
+	// Validate the query
+	if query == "" {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "Please provide a search query or URL.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+
+	// Check if the user is in a voice channel
+	voiceState, err := getVoiceState(s, i.Member.User.ID, i.GuildID)
+	if err != nil {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: "You must be connected to a voice channel to use this command.",
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+
+	// Get voice connection
+	vc, err := getConnectedVoiceConnection(s, i.GuildID)
+	if err != nil || vc == nil {
+		// Auto-join voice channel if not connected
+		log.Printf("Bot not in voice channel, auto-joining %s", voiceState.ChannelID)
+		
+		// Retry mechanism for handling 4016 errors during voice connection
+		maxRetries := 3
+		retryCount := 0
+		var vc *discordgo.VoiceConnection
+		var err error
+		
+		for retryCount < maxRetries {
+			vc, err = s.ChannelVoiceJoin(i.GuildID, voiceState.ChannelID, false, true)
+			if err == nil && vc != nil {
+				// Success, break out of retry loop
+				break
+			}
+			
+			// Check if the error is related to encryption mode
+			if err != nil && (strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") || strings.Contains(err.Error(), "Unknown encryption mode")) {
+				log.Printf("Encryption mode error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
+				retryCount++
+				
+				// Wait before retrying
+				time.Sleep(2 * time.Second)
+				
+				// Continue to next iteration to retry
+				continue
+			} else if err != nil {
+				// Different error, don't retry
+				log.Printf("Error auto-joining voice channel: %v", err)
+				_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+					Content: "❌ Gagal join voice channel. Coba lagi nanti!",
+				})
+				if err != nil {
+					log.Printf("Error sending follow-up message: %v", err)
+				}
+				return
+			} else if vc == nil {
+				// Voice connection is nil, retry
+				log.Printf("Voice connection is nil (attempt %d/%d), retrying...", retryCount+1, maxRetries)
+				retryCount++
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		}
+		
+		if vc == nil {
+			log.Printf("Failed to join voice channel after %d attempts", maxRetries)
+			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Content: "❌ Gagal join voice channel setelah beberapa percobaan. Coba lagi nanti!",
+			})
+			if err != nil {
+				log.Printf("Error sending follow-up message: %v", err)
+			}
+			return
+		}
+	}
+
+	// Get track info using yt-dlp
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	track, err := getYoutubeInfoWithContext(ctx, query)
+	if err != nil {
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("❌ Error getting track info: %v", err),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	// Set the requester
+	track.RequesterID = i.Member.User.ID
+	track.RequesterUsername = i.Member.User.Username
+
+	// Add the track to the queue
+	mutex.Lock()
+	guildCtx, exists := guildContexts[i.GuildID]
+	if !exists {
+		guildCtx = &GuildContext{
+			MusicQueue: &MusicQueue{},
+		}
+		guildContexts[i.GuildID] = guildCtx
+	}
+
+	if guildCtx.MusicQueue == nil {
+		guildCtx.MusicQueue = &MusicQueue{}
+	}
+	
+	// Check if the queue has reached the maximum size
+	if len(guildCtx.MusicQueue.Tracks) >= MaxQueueSize {
+		mutex.Unlock()
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("❌ Antrean sudah penuh! Maksimal %d lagu dalam antrean. Silakan tunggu hingga ada lagu yang selesai diputar.", MaxQueueSize),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return
+	}
+	
+	guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
+	mutex.Unlock()
+
+	log.Printf("Added track '%s' to queue for guild %s", track.Title, i.GuildID)
+
+	// If nothing is currently playing, start playback
+	var tempGuildCtx *GuildContext
+	var tempExists bool
+	var hasTrack bool
+	mutex.RLock()
+	tempGuildCtx, tempExists = guildContexts[i.GuildID]
+	hasTrack = false
+	if tempExists && tempGuildCtx != nil && tempGuildCtx.CurrentTrack != nil {
+		hasTrack = true
+	}
+	mutex.RUnlock()
+	
+	if !hasTrack {
+		log.Printf("Nothing playing, starting playback for guild %s", i.GuildID)
+		playNextTrack(s, i.GuildID, voiceState.ChannelID)
+
+		// Send enhanced now playing message with love points
+		statsMutex.RLock()
+		userStat, exists := userStats[i.Member.User.ID]
+		statsMutex.RUnlock()
+		
+		level := 0
+		lovePoints := 0
+		if exists && userStat != nil {
+			level = userStat.Level
+			lovePoints = userStat.LovePoints
+		}
+		
+		// Create a more detailed "Now Playing" message
+		nowPlayingMessage := fmt.Sprintf(
+			"🎵 **Now Playing:** `%s`\n"+
+			"👤 **Requested by:** %s **(Level %d)**\n"+
+			"⏱️ **Duration:** %s\n"+
+			"💝 **Love Points:** %d",
+			track.Title,
+			i.Member.User.Username,
+			level,
+			track.Duration,
+			lovePoints,
+		)
+		
+		// Send the message with embed if thumbnail is available
+		if track.Thumbnail != "" {
+			embed := &discordgo.MessageEmbed{
+				Title:       "🎵 Now Playing",
+				URL:         track.URL,
+				Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
+				Fields: []*discordgo.MessageEmbedField{
+					{
+						Name:  "👤 Requested by",
+						Value: fmt.Sprintf("%s (Level %d)", i.Member.User.Username, level),
+						Inline: true,
+					},
+					{
+						Name:  "⏱️ Duration",
+						Value: track.Duration,
+						Inline: true,
+					},
+					{
+						Name:  "💝 Love Points",
+						Value: fmt.Sprintf("%d", lovePoints),
+						Inline: true,
+					},
+				},
+				Color: 0xff69b4, // Pink color for romantic feel
+				Thumbnail: &discordgo.MessageEmbedThumbnail{
+					URL: track.Thumbnail,
+				},
+			}
+			
+			// Create buttons for controls
+			components := []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: discordgo.ComponentEmoji{Name: "⏯️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "pause_resume_" + i.GuildID,
+						},
+						discordgo.Button{
+							Emoji: discordgo.ComponentEmoji{Name: "⏭️"},
+							Style: discordgo.PrimaryButton,
+							CustomID: "skip_" + i.GuildID,
+						},
+						discordgo.Button{
+							Emoji: discordgo.ComponentEmoji{Name: "⏹️"},
+							Style: discordgo.DangerButton,
+							CustomID: "stop_" + i.GuildID,
+						},
+						discordgo.Button{
+							Emoji: discordgo.ComponentEmoji{Name: "🔁"},
+							Style: discordgo.SecondaryButton,
+							CustomID: "loop_" + i.GuildID,
+						},
+					},
+				},
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Emoji: discordgo.ComponentEmoji{Name: "🛡️"},
+							Style: discordgo.SuccessButton,
+							CustomID: "guard_room_" + i.GuildID,
+						},
+					},
+				},
+			}
+			
+			// Send the embed with buttons using follow-up
+			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Embeds:     []*discordgo.MessageEmbed{embed},
+				Components: components,
+			})
+			if err != nil {
+				log.Printf("Error sending follow-up message: %v", err)
+			}
+		} else {
+			// Send simple message if no thumbnail
+			_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Content: nowPlayingMessage,
+			})
+			if err != nil {
+				log.Printf("Error sending follow-up message: %v", err)
+			}
+		}
+	} else {
+		// Send a message that the track was added to the queue
+		log.Printf("Track added to queue, currently playing another track in guild %s", i.GuildID)
+		_, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("Added `%s` to the queue.", track.Title),
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
 	}
 }
 
@@ -2544,7 +2894,7 @@ func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discord
 	if exists && guildCtx != nil && guildCtx.VoiceConnection != nil {
 		vc := guildCtx.VoiceConnection
 		mutex.RUnlock()
-		
+
 		// Verify that the connection is still active
 		if vc != nil && vc.Ready {
 			return vc, nil
@@ -2561,7 +2911,7 @@ func getConnectedVoiceConnection(s *discordgo.Session, guildID string) (*discord
 		}
 		return vc, nil
 	}
-	
+
 	return nil, fmt.Errorf("no voice connection found for guild %s", guildID)
 }
 
@@ -2587,7 +2937,7 @@ func getVoiceState(s *discordgo.Session, userID, guildID string) (*discordgo.Voi
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Get the voice states from the refreshed guild
 	if refreshedGuild != nil && refreshedGuild.VoiceStates != nil {
 		for _, vs := range refreshedGuild.VoiceStates {
@@ -2607,22 +2957,22 @@ func handleEncryptionMode(vc *discordgo.VoiceConnection) {
 	if vc == nil {
 		return
 	}
-	
+
 	// Wait for the connection to establish
 	for i := 0; i < 100 && !vc.Ready; i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	// Log the readiness of the connection
 	if !vc.Ready {
 		log.Println("Warning: Voice connection is not ready")
 	} else {
 		log.Println("Voice connection is ready")
 	}
-	
+
 	// For newer Discord requirements, ensure we're using compatible settings
 	// The encryption is handled internally by the library, but we ensure the connection is ready
-	
+
 	// Additional check for AEAD encryption support
 	// This addresses the "Unknown encryption mode" error (4016)
 	log.Println("Voice connection established, ready for AEAD encryption")
@@ -2634,32 +2984,32 @@ func createProgressBar(currentTime, totalTime int) string {
 	if totalTime <= 0 {
 		return strings.Repeat("▬", barLength) + " ▫▫▫▫▫"
 	}
-	
+
 	progress := int((float64(currentTime) / float64(totalTime)) * barLength)
 	if progress > barLength {
 		progress = barLength
 	}
-	
+
 	bar := strings.Repeat("▬", progress) + "🔘" + strings.Repeat("▬", barLength-progress)
-	
+
 	// Add time indicators at specific positions
 	indicatorPos := make([]string, barLength+1)
 	for i := range indicatorPos {
 		indicatorPos[i] = "▫"
 	}
-	
+
 	// Place time indicators at 25%, 50%, 75% positions
 	if barLength >= 4 {
 		indicatorPos[barLength/4] = "⏱️"
 		indicatorPos[barLength/2] = "💡"
 		indicatorPos[(3*barLength)/4] = "🔥"
 	}
-	
+
 	// Replace the indicator at progress position with a different symbol
 	if progress <= barLength && progress >= 0 {
 		indicatorPos[progress] = "✅"
 	}
-	
+
 	return bar + "\n" + strings.Join(indicatorPos, "")
 }
 
@@ -2668,11 +3018,11 @@ func formatTime(seconds int) string {
 	if seconds < 0 {
 		seconds = 0
 	}
-	
+
 	hours := seconds / 3600
 	minutes := (seconds % 3600) / 60
 	secs := seconds % 60
-	
+
 	if hours > 0 {
 		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
 	}
@@ -2683,26 +3033,26 @@ func formatTime(seconds int) string {
 func updateUserStats(userID string) {
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
-	
+
 	userStat, exists := userStats[userID]
 	if !exists {
 		userStat = &UserStats{
-			LovePoints: 0,
-			Level: 0,
-			TotalMessages: 0,
-			LastActivity: time.Now(),
+			LovePoints:          0,
+			Level:               0,
+			TotalMessages:       0,
+			LastActivity:        time.Now(),
 			CurrentSongRequests: 0,
 		}
 		userStats[userID] = userStat
 	}
-	
+
 	// Update stats
 	userStat.TotalMessages++
 	userStat.LastActivity = time.Now()
-	
+
 	// Award love points for activity
 	userStat.LovePoints += 1
-	
+
 	// Calculate new level based on love points
 	newLevel := calculateLevel(userStat.LovePoints)
 	if newLevel > userStat.Level {
@@ -2721,21 +3071,21 @@ func handleLovePointsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	statsMutex.RLock()
 	userStat, exists := userStats[m.Author.ID]
 	statsMutex.RUnlock()
-	
+
 	if !exists || userStat == nil {
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s, you don't have any love points yet. Send some messages to earn them! 💕", m.Author.Username))
 		return
 	}
-	
+
 	levelName := getLevelName(userStat.Level)
-	
+
 	message := fmt.Sprintf(
 		"💖 **%s's Love Points** 💖\n"+
-		"**Points:** %d\n"+
-		"**Level:** %d (%s)\n"+
-		"**Messages:** %d\n"+
-		"**Songs Requested:** %d\n"+
-		"**Last Active:** %s",
+			"**Points:** %d\n"+
+			"**Level:** %d (%s)\n"+
+			"**Messages:** %d\n"+
+			"**Songs Requested:** %d\n"+
+			"**Last Active:** %s",
 		m.Author.Username,
 		userStat.LovePoints,
 		userStat.Level,
@@ -2744,7 +3094,7 @@ func handleLovePointsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		userStat.CurrentSongRequests,
 		userStat.LastActivity.Format("Jan 2, 2006 at 3:04 PM"),
 	)
-	
+
 	s.ChannelMessageSend(m.ChannelID, message)
 }
 
@@ -2753,24 +3103,24 @@ func handleCoupleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 	// Get allowed user IDs to identify the couple
 	allowedUserIDs := os.Getenv("ALLOWED_USER_IDS")
 	idParts := strings.Split(allowedUserIDs, ",")
-	
+
 	if len(idParts) < 2 {
 		s.ChannelMessageSend(m.ChannelID, "Not enough users in the allowed list to show couple stats.")
 		return
 	}
-	
+
 	user1ID := strings.TrimSpace(idParts[0])
 	user2ID := strings.TrimSpace(idParts[1])
-	
+
 	statsMutex.RLock()
 	user1Stat, user1Exists := userStats[user1ID]
 	user2Stat, user2Exists := userStats[user2ID]
 	statsMutex.RUnlock()
-	
+
 	var user1Name, user2Name string
 	var user1Level, user2Level int
 	var user1Points, user2Points int
-	
+
 	// Get user names and stats
 	if user1Exists && user1Stat != nil {
 		user1Name = getUserByUsernameID(s, user1ID)
@@ -2779,7 +3129,7 @@ func handleCoupleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 	} else {
 		user1Name = getUserByUsernameID(s, user1ID)
 	}
-	
+
 	if user2Exists && user2Stat != nil {
 		user2Name = getUserByUsernameID(s, user2ID)
 		user2Level = user2Stat.Level
@@ -2787,28 +3137,28 @@ func handleCoupleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 	} else {
 		user2Name = getUserByUsernameID(s, user2ID)
 	}
-	
+
 	if user1Name == "" {
 		user1Name = "User1"
 	}
 	if user2Name == "" {
 		user2Name = "User2"
 	}
-	
+
 	message := fmt.Sprintf(
 		"💕 **Couple Statistics** 💕\n\n"+
-		"**%s**\n"+
-		"• Level: %d\n"+
-		"• Love Points: %d\n\n"+
-		"**%s**\n"+
-		"• Level: %d\n"+
-		"• Love Points: %d\n\n"+
-		"💖 Total Combined Love Points: %d 💖",
+			"**%s**\n"+
+			"• Level: %d\n"+
+			"• Love Points: %d\n\n"+
+			"**%s**\n"+
+			"• Level: %d\n"+
+			"• Love Points: %d\n\n"+
+			"💖 Total Combined Love Points: %d 💖",
 		user1Name, user1Level, user1Points,
 		user2Name, user2Level, user2Points,
 		user1Points+user2Points,
 	)
-	
+
 	s.ChannelMessageSend(m.ChannelID, message)
 }
 
@@ -2817,14 +3167,14 @@ func handleLoveProfileCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 	statsMutex.RLock()
 	userStat, exists := userStats[m.Author.ID]
 	statsMutex.RUnlock()
-	
+
 	if !exists || userStat == nil {
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s, your profile is still being created. Interact more with the bot!", m.Author.Username))
 		return
 	}
-	
+
 	levelName := getLevelName(userStat.Level)
-	
+
 	// Calculate some achievements
 	achievements := []string{}
 	if userStat.TotalMessages > 100 {
@@ -2836,20 +3186,20 @@ func handleLoveProfileCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 	if userStat.CurrentSongRequests > 10 {
 		achievements = append(achievements, "DJ Expert 🎵")
 	}
-	
+
 	achievementStr := "None yet"
 	if len(achievements) > 0 {
 		achievementStr = strings.Join(achievements, ", ")
 	}
-	
+
 	message := fmt.Sprintf(
 		"💞 **%s's Love Profile** 💞\n"+
-		"**Level:** %d (%s)\n"+
-		"**Love Points:** %d\n"+
-		"**Total Messages:** %d\n"+
-		"**Songs Requested:** %d\n"+
-		"**Achievements:** %s\n"+
-		"**Member Since:** %s",
+			"**Level:** %d (%s)\n"+
+			"**Love Points:** %d\n"+
+			"**Total Messages:** %d\n"+
+			"**Songs Requested:** %d\n"+
+			"**Achievements:** %s\n"+
+			"**Member Since:** %s",
 		m.Author.Username,
 		userStat.Level,
 		levelName,
@@ -2859,7 +3209,7 @@ func handleLoveProfileCommand(s *discordgo.Session, m *discordgo.MessageCreate) 
 		achievementStr,
 		userStat.LastActivity.Format("January 2, 2006"),
 	)
-	
+
 	s.ChannelMessageSend(m.ChannelID, message)
 }
 
@@ -2896,16 +3246,16 @@ func getUserByUsernameID(s *discordgo.Session, userID string) string {
 func getOrCreateUserPrefs(userID string) *UserPreferences {
 	prefsMutex.Lock()
 	defer prefsMutex.Unlock()
-	
+
 	prefs, exists := userPreferences[userID]
 	if !exists {
 		prefs = &UserPreferences{
-			Volume: 1.0, // Default volume at 100%
+			Volume:         1.0, // Default volume at 100%
 			SavedPlaylists: make(map[string]*SavedPlaylist),
 		}
 		userPreferences[userID] = prefs
 	}
-	
+
 	return prefs
 }
 
@@ -2916,25 +3266,25 @@ func handleVolumeCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre volume [0-100]' atau 'Queen volume [0-100]'")
 		return
 	}
-	
+
 	volumeStr := parts[2]
 	volume, err := strconv.ParseFloat(volumeStr, 64)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, "Silakan masukkan angka antara 0-100 untuk volume.")
 		return
 	}
-	
+
 	if volume < 0 || volume > 100 {
 		s.ChannelMessageSend(m.ChannelID, "Volume harus antara 0-100.")
 		return
 	}
-	
+
 	// Convert to 0.0-1.0 scale
 	volume /= 100.0
-	
+
 	prefs := getOrCreateUserPrefs(m.Author.ID)
 	prefs.Volume = volume
-	
+
 	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔊 Volume diatur ke %.0f%%", volume*100))
 }
 
@@ -2945,33 +3295,33 @@ func handleSavePlaylistCommand(s *discordgo.Session, m *discordgo.MessageCreate)
 		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre saveplaylist [nama] [url]' atau 'Queen saveplaylist [nama] [url]'")
 		return
 	}
-	
+
 	playlistName := parts[2]
 	trackURL := parts[3]
-	
+
 	// Get track info
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	track, err := getYoutubeInfoWithContext(ctx, trackURL)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
 		return
 	}
-	
+
 	prefs := getOrCreateUserPrefs(m.Author.ID)
-	
+
 	playlist, exists := prefs.SavedPlaylists[playlistName]
 	if !exists {
 		playlist = &SavedPlaylist{
-			Name: playlistName,
+			Name:   playlistName,
 			Tracks: make([]*Track, 0),
 		}
 		prefs.SavedPlaylists[playlistName] = playlist
 	}
-	
+
 	playlist.Tracks = append(playlist.Tracks, track)
-	
+
 	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Lagu '%s' telah ditambahkan ke playlist '%s'", track.Title, playlistName))
 }
 
@@ -2982,16 +3332,16 @@ func handleLoadPlaylistCommand(s *discordgo.Session, m *discordgo.MessageCreate)
 		s.ChannelMessageSend(m.ChannelID, "Gunakan perintah: 'Lyre loadplaylist [nama]' atau 'Queen loadplaylist [nama]'")
 		return
 	}
-	
+
 	playlistName := parts[2]
-	
+
 	prefs := getOrCreateUserPrefs(m.Author.ID)
 	playlist, exists := prefs.SavedPlaylists[playlistName]
 	if !exists {
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Playlist '%s' tidak ditemukan.", playlistName))
 		return
 	}
-	
+
 	// Add all tracks in the playlist to the music queue
 	mutex.Lock()
 	guildCtx, exists := guildContexts[m.GuildID]
@@ -3001,24 +3351,24 @@ func handleLoadPlaylistCommand(s *discordgo.Session, m *discordgo.MessageCreate)
 		}
 		guildContexts[m.GuildID] = guildCtx
 	}
-	
+
 	if guildCtx.MusicQueue == nil {
 		guildCtx.MusicQueue = &MusicQueue{}
 	}
-	
+
 	// Check if the queue has space for all tracks
-	if len(guildCtx.MusicQueue.Tracks) + len(playlist.Tracks) > MaxQueueSize {
+	if len(guildCtx.MusicQueue.Tracks)+len(playlist.Tracks) > MaxQueueSize {
 		mutex.Unlock()
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Tidak cukup ruang dalam antrean! Maksimal %d lagu dalam antrean. Playlist memiliki %d lagu.", MaxQueueSize, len(playlist.Tracks)))
 		return
 	}
-	
+
 	// Add all tracks from the playlist to the queue
 	for _, track := range playlist.Tracks {
 		guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
 	}
 	mutex.Unlock()
-	
+
 	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎵 Playlist '%s' dengan %d lagu telah ditambahkan ke antrean.", playlistName, len(playlist.Tracks)))
 }
 
@@ -3052,7 +3402,6 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 Selamat menikmati musik dengan Queen's Lɣre୨ৎ⭑! 🎶
 	`
-	
+
 	s.ChannelMessageSend(m.ChannelID, helpMessage)
 }
-
