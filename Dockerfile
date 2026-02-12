@@ -1,7 +1,7 @@
-# Multi-stage Dockerfile for Oxide Music Bot
+# Multi-stage Dockerfile for Oxide Music Bot with updated dependencies
 
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install dependencies needed for building
 RUN apk add --no-cache git ca-certificates gcc musl-dev opus-dev pkgconfig
@@ -12,13 +12,15 @@ WORKDIR /app
 # Copy go mod files
 COPY go.mod go.sum ./
 
-# Download dependencies
-RUN go mod download
+# Download and update dependencies, forcing latest discordgo that supports new encryption modes
+RUN go mod download && \
+    go get -u github.com/bwmarrin/discordgo@master && \
+    go mod tidy
 
 # Copy source code
 COPY . .
 
-# Build the binary
+# Build the binary with latest dependencies
 RUN CGO_ENABLED=1 GOOS=linux go build -o oxide-music-bot .
 
 # Runtime stage
@@ -60,7 +62,6 @@ RUN chown -R appuser:appgroup /app
 
 # Switch to non-root user
 USER appuser
-
 
 # Run the binary
 CMD ["./oxide-music-bot"]
