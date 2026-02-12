@@ -268,7 +268,7 @@ func voiceConnectionHealthCheck() {
 					guardModeMutex.RUnlock()
 					
 					if shouldStayConnected || roomGuardEnabled {
-						log.Printf("Reconnecting voice connection for guild %s", guildID)
+						log.Printf("Attempting to reconnect voice connection for guild %s", guildID)
 						// Attempt to rejoin the voice channel
 						go func(gID string, channelID string) {
 							// Small delay before attempting reconnection
@@ -292,24 +292,44 @@ func voiceConnectionHealthCheck() {
 								// Update the voice connection in the guild context
 								mutex.Lock()
 								if existingCtx, exists := guildContexts[gID]; exists && existingCtx != nil {
-									existingCtx.VoiceConnection = newVc
-									
-									// Initialize OpusSend channel if needed
-									if newVc.OpusSend == nil {
-										newVc.OpusSend = make(chan []byte, 100)
+									// Only update if the voice connection is still needed
+									shouldUpdate := false
+									if existingCtx.MusicQueue != nil && len(existingCtx.MusicQueue.Tracks) > 0 {
+										shouldUpdate = true
+									}
+									if existingCtx.CurrentTrack != nil {
+										shouldUpdate = true
 									}
 									
-									// Set log level to debug
-									newVc.LogLevel = discordgo.LogDebug
+									// Also check room guard mode
+									guardModeMutex.RLock()
+									roomGuardEnabled := roomGuardMode[gID]
+									guardModeMutex.RUnlock()
 									
-									log.Printf("Successfully reconnected voice connection for guild %s", gID)
-									
-									// If there was a current track, restart playback
-									if existingCtx.CurrentTrack != nil {
-										go func() {
-											time.Sleep(2 * time.Second) // Small delay before restarting
-											playNextTrack(session, gID, channelID)
-										}()
+									if shouldUpdate || roomGuardEnabled {
+										existingCtx.VoiceConnection = newVc
+										
+										// Initialize OpusSend channel if needed
+										if newVc.OpusSend == nil {
+											newVc.OpusSend = make(chan []byte, 100)
+										}
+										
+										// Set log level to debug
+										newVc.LogLevel = discordgo.LogDebug
+										
+										log.Printf("Successfully reconnected voice connection for guild %s", gID)
+										
+										// If there was a current track, restart playback
+										if existingCtx.CurrentTrack != nil {
+											go func() {
+												time.Sleep(2 * time.Second) // Small delay before restarting
+												playNextTrack(session, gID, channelID)
+											}()
+										}
+									} else {
+										// No need to maintain connection, disconnect
+										log.Printf("No active tracks or guard mode for guild %s, disconnecting voice connection", gID)
+										newVc.Disconnect()
 									}
 								}
 								mutex.Unlock()
@@ -318,6 +338,51 @@ func voiceConnectionHealthCheck() {
 								newVc.Disconnect()
 							}
 						}(guildID, vc.ChannelID)
+					}
+				} else {
+					// Connection is ready, check if we need to maintain it
+					shouldStayConnected := false
+					if guildCtx.MusicQueue != nil && len(guildCtx.MusicQueue.Tracks) > 0 {
+						shouldStayConnected = true
+					}
+					if guildCtx.CurrentTrack != nil {
+						shouldStayConnected = true
+					}
+					
+					// Check room guard mode
+					guardModeMutex.RLock()
+					roomGuardEnabled := roomGuardMode[guildID]
+					guardModeMutex.RUnlock()
+					
+					// If no reason to stay connected and guard mode is off, consider disconnecting
+					if !shouldStayConnected && !roomGuardEnabled {
+						// Check if anyone else is in the voice channel
+						guild, err := session.State.Guild(guildID)
+						if err == nil && guild != nil && guild.VoiceStates != nil {
+							someoneElseInChannel := false
+							for _, vs := range guild.VoiceStates {
+								if vs != nil && vs.ChannelID == vc.ChannelID && vs.UserID != session.State.User.ID {
+									someoneElseInChannel = true
+									break
+								}
+							}
+							
+							// Only disconnect if no one else is in the channel
+							if !someoneElseInChannel {
+								log.Printf("No active tracks and no one else in voice channel for guild %s, disconnecting", guildID)
+								go func(vConn *discordgo.VoiceConnection) {
+									time.Sleep(5 * time.Second) // Grace period before disconnecting
+									vConn.Disconnect()
+								}(vc)
+								
+								// Clear the voice connection from the guild context
+								mutex.Lock()
+								if existingCtx, exists := guildContexts[guildID]; exists && existingCtx != nil {
+									existingCtx.VoiceConnection = nil
+								}
+								mutex.Unlock()
+							}
+						}
 					}
 				}
 			}
@@ -2730,87 +2795,23 @@ connectionReadyLabel:
 				}
 			}()
 
-			// Enhanced retry mechanism for handling 4016 errors
-			maxRetries := 5  // Increased retries
-			retryCount := 0
-			for retryCount < maxRetries {
-				err := playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
-				if err == nil {
-					// Success, break out of retry loop
-					log.Printf("Successfully played track: %s", nextTrack.Title)
-					break
-				}
-
-				// Check if the error is related to encryption mode
+			// Single attempt to play audio - let the health check handle reconnection if needed
+			err := playAudioStream(vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
+			if err != nil {
+				log.Printf("Error playing audio stream: %v", err)
+				
+				// Check if it's an encryption error that requires reconnection
 				if strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") {
-					log.Printf("Encryption error detected (attempt %d/%d), reconnecting...", retryCount+1, maxRetries)
-					retryCount++
-
-					// Disconnect and reconnect with a more robust approach
-					if vc != nil {
-						vc.Disconnect()
-					}
-					time.Sleep(2 * time.Second) // Longer wait before reconnection
-
-					// Rejoin voice channel with retry logic
-					var newVc *discordgo.VoiceConnection
-					for reconnectAttempt := 0; reconnectAttempt < 3; reconnectAttempt++ {
-						newVc, err = s.ChannelVoiceJoin(guildID, channelID, false, true)
-						if err == nil && newVc != nil {
-							// Wait for connection to be ready
-							for i := 0; i < 100 && !newVc.Ready; i++ {
-								time.Sleep(100 * time.Millisecond)
-							}
-							
-							if newVc.Ready {
-								// Initialize OpusSend channel with larger buffer
-								if newVc.OpusSend == nil {
-									newVc.OpusSend = make(chan []byte, 100)
-								}
-								break
-							} else {
-								log.Printf("Reconnected VC not ready, attempt %d/3", reconnectAttempt+1)
-								newVc.Disconnect()
-								time.Sleep(1 * time.Second)
-							}
-						} else {
-							log.Printf("Reconnection attempt %d failed: %v", reconnectAttempt+1, err)
-							time.Sleep(2 * time.Second)
-						}
-					}
-
-					if err != nil || newVc == nil || !newVc.Ready {
-						log.Printf("Failed to rejoin voice channel after multiple attempts: %v", err)
-						break
-					}
-
-					// Update the voice connection in the guild context
-					mutex.Lock()
-					guildCtx.VoiceConnection = newVc
-					mutex.Unlock()
-
-					// Set log level to debug to see encryption details
-					newVc.LogLevel = discordgo.LogDebug
-
-					// Initialize OpusSend channel with larger buffer
-					if newVc.OpusSend == nil {
-						newVc.OpusSend = make(chan []byte, 100)
-					}
-
-					// Update vc reference for the next iteration
-					vc = newVc
-
-					// Wait a bit before retrying
-					time.Sleep(1 * time.Second)
-				} else {
-					// Different error, don't retry
-					log.Printf("Non-encryption error in playAudioStream: %v", err)
-					break
+					log.Printf("Encryption error detected, scheduling reconnection for guild %s", guildID)
+					// Schedule reconnection through the health check rather than doing it immediately
+					// This prevents rapid connect/disconnect cycles
+					go func() {
+						time.Sleep(2 * time.Second) // Brief delay before allowing reconnection
+						// The health check will handle reconnection if needed
+					}()
 				}
-			}
-
-			if retryCount >= maxRetries {
-				log.Printf("Failed to play audio after %d retries due to connection errors", maxRetries)
+			} else {
+				log.Printf("Successfully played track: %s", nextTrack.Title)
 			}
 		}(nextTrack) // Pass nextTrack as argument to the goroutine
 	} else {
