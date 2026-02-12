@@ -234,7 +234,7 @@ func main() {
 	go voiceConnectionHealthCheck()
 
 	// Start message cleanup routine
-	go cleanupOldMessages(session)
+	go cleanupOldMessages()
 
 	// Wait here until CTRL+C or other term signal is received
 	sc := make(chan os.Signal, 1)
@@ -2454,23 +2454,20 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 }
 
 // cleanupOldMessages periodically cleans up old interaction messages that are no longer needed
-func cleanupOldMessages(s *discordgo.Session) {
+func cleanupOldMessages() {
 	ticker := time.NewTicker(10 * time.Minute) // Clean up every 10 minutes
 	defer ticker.Stop()
 
 	// Map to store message timestamps for cleanup
 	oldMessages := make(map[string]time.Time)
 
-	for {
-		select {
-		case <-ticker.C:
-			// Clean up old messages that are no longer relevant
-			now := time.Now()
-			for msgID, timestamp := range oldMessages {
-				if now.Sub(timestamp) > 30*time.Minute { // Delete messages older than 30 minutes
-					// Try to delete the message (ignore errors)
-					delete(oldMessages, msgID)
-				}
+	for range ticker.C {
+		// Clean up old messages that are no longer relevant
+		now := time.Now()
+		for msgID, timestamp := range oldMessages {
+			if now.Sub(timestamp) > 30*time.Minute { // Delete messages older than 30 minutes
+				// Try to delete the message (ignore errors)
+				delete(oldMessages, msgID)
 			}
 		}
 	}
@@ -2568,7 +2565,7 @@ func getYoutubeInfoWithContext(ctx context.Context, url string) (*Track, error) 
 	// Format duration
 	durationStr := formatDuration(info.Duration)
 
-	log.Printf("yt-dlp berhasil dapet link: " + info.WebpageURL)
+	log.Printf("yt-dlp berhasil dapet link: %s", info.WebpageURL)
 	log.Printf("getYoutubeInfo: Successfully retrieved info for '%s'", info.Title)
 
 	return &Track{
