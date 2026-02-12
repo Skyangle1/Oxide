@@ -93,6 +93,12 @@ var (
 	prefsMutex sync.RWMutex
 )
 
+// Global variable for room guard mode
+var (
+	roomGuardMode = make(map[string]bool) // Maps guildID to guard mode status
+	guardModeMutex sync.RWMutex
+)
+
 // RateLimiter tracks user requests to prevent abuse
 type RateLimiter struct {
 	requests map[string][]time.Time
@@ -300,6 +306,18 @@ func registerCommands(appID string) {
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        "name",
 					Description: "Playlist name",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "oxide-guardroom",
+			Description: "Toggle room guard mode (bot stays in voice channel even when idle)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionBoolean,
+					Name:        "enable",
+					Description: "Enable or disable room guard mode",
 					Required:    true,
 				},
 			},
@@ -561,6 +579,15 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 									},
 								},
 							},
+							discordgo.ActionsRow{
+								Components: []discordgo.MessageComponent{
+									discordgo.Button{
+										Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+										Style: discordgo.SuccessButton,
+										CustomID: "guard_room_" + m.GuildID,
+									},
+								},
+							},
 						}
 
 						// Send the embed with buttons
@@ -645,6 +672,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			handleSlashSavePlaylistCommand(s, i)
 		case "oxide-loadplaylist":
 			handleSlashLoadPlaylistCommand(s, i)
+		case "oxide-guardroom":
+			handleGuardRoomCommand(s, i)
 		}
 	}
 	// Handle button interactions
@@ -1187,6 +1216,15 @@ func handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreat
 				},
 			},
 		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Emoji: &discordgo.ComponentEmoji{Name: "🛡️"},
+					Style: discordgo.SuccessButton,
+					CustomID: "guard_room_" + i.GuildID,
+				},
+			},
+		},
 	}
 
 	// Send the embed with buttons using follow-up
@@ -1345,6 +1383,37 @@ func handleSlashLoadPlaylistCommand(s *discordgo.Session, i *discordgo.Interacti
 	
 	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("🎵 Playlist '%s' dengan %d lagu telah ditambahkan ke antrean.", playlistName, len(playlist.Tracks)),
+	})
+	if err != nil {
+		log.Printf("Error sending follow-up message: %v", err)
+	}
+}
+
+// handleGuardRoomCommand handles the guard room command
+func handleGuardRoomCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		log.Printf("Error deferring interaction: %v", err)
+		return
+	}
+
+	// Get the enable option
+	enable := i.ApplicationCommandData().Options[0].BoolValue()
+	
+	// Set the room guard mode for this guild
+	guardModeMutex.Lock()
+	roomGuardMode[i.GuildID] = enable
+	guardModeMutex.Unlock()
+	
+	status := "disabled"
+	if enable {
+		status = "enabled"
+	}
+	
+	_, err = s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("🛡️ Room guard mode %s. Bot will %s stay in voice channel when idle.", status, map[bool]string{true: "now", false: "no longer"}[enable]),
 	})
 	if err != nil {
 		log.Printf("Error sending follow-up message: %v", err)
@@ -1539,6 +1608,28 @@ func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreat
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
 				Content: fmt.Sprintf("🔄 Loop mode %s.", status),
+			},
+		})
+	case strings.HasPrefix(buttonID, "guard_room"):
+		// Toggle room guard mode
+		guardModeMutex.Lock()
+		currentMode, exists := roomGuardMode[guildID]
+		newMode := !currentMode  // Toggle the current mode
+		if !exists {
+			newMode = true  // Default to true if not previously set
+		}
+		roomGuardMode[guildID] = newMode
+		guardModeMutex.Unlock()
+		
+		modeStatus := "disabled"
+		if newMode {
+			modeStatus = "enabled"
+		}
+		
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("🛡️ Room guard mode %s. Bot will %s stay in voice channel when idle.", modeStatus, map[bool]string{true: "now", false: "no longer"}[newMode]),
 			},
 		})
 	}
@@ -2159,10 +2250,19 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 			}
 		}
 
-		// No one else is in the channel, but we keep the connection alive to maintain the room
-		// This keeps the bot in the voice channel to maintain the room
-		// We don't disconnect even if no one else is in the voice channel
-		return
+		// Check if room guard mode is enabled for this guild
+		guardModeMutex.RLock()
+		shouldGuard := roomGuardMode[guildID]
+		guardModeMutex.RUnlock()
+		
+		if shouldGuard {
+			// Room guard mode is enabled, keep the connection alive
+			return
+		} else {
+			// Room guard mode is disabled, disconnect as before
+			vc.Disconnect()
+			return
+		}
 	}
 
 	// Get the next track - using len() is safe even if Tracks is nil (returns 0)
