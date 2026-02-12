@@ -1424,20 +1424,43 @@ func handleGuardRoomCommand(s *discordgo.Session, i *discordgo.InteractionCreate
 func handleButtonInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	buttonID := i.MessageComponentData().CustomID
 
-	// Extract guild ID from button ID
-	parts := strings.Split(buttonID, "_")
-	if len(parts) < 2 {
-		log.Printf("handleButtonInteraction: Invalid button ID format: %s", buttonID)
+	// Extract guild ID from button ID based on the prefix
+	var guildID string
+	switch {
+	case strings.HasPrefix(buttonID, "pause_resume_"):
+		guildID = strings.TrimPrefix(buttonID, "pause_resume_")
+	case strings.HasPrefix(buttonID, "skip_"):
+		guildID = strings.TrimPrefix(buttonID, "skip_")
+	case strings.HasPrefix(buttonID, "stop_"):
+		guildID = strings.TrimPrefix(buttonID, "stop_")
+	case strings.HasPrefix(buttonID, "loop_"):
+		guildID = strings.TrimPrefix(buttonID, "loop_")
+	case strings.HasPrefix(buttonID, "guard_room_"):
+		guildID = strings.TrimPrefix(buttonID, "guard_room_")
+	default:
+		log.Printf("handleButtonInteraction: Unknown button ID format: %s", buttonID)
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "Invalid button format.",
+				Content: "Unknown button format.",
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
 		return
 	}
-	guildID := parts[1]
+
+	// Validate that we extracted a guild ID
+	if guildID == "" {
+		log.Printf("handleButtonInteraction: Could not extract guild ID from button ID: %s", buttonID)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Could not determine guild ID.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
 	
 	// Check if the user is in the same voice channel as the bot
 	voiceState, err := getVoiceState(s, i.Member.User.ID, guildID)
