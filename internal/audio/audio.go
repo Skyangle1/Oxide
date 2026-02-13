@@ -462,7 +462,8 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	}()
 	// --- UI MODIFICATION END ---
 
-	if vc != nil && (vc.Ready || connectionReady) {
+	// Allow playback if vc exists, even if Ready flag is lagging (we trust the heartbeat/session)
+	if vc != nil {
 		vc.LogLevel = discordgo.LogDebug
 
 		go func(nextTrack *models.Track) {
@@ -492,7 +493,7 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 			}
 		}(nextTrack)
 	} else {
-		log.Printf("playNextTrack: Conditions not met for playback - vc: %v, vc.Ready: %v", vc != nil, vc != nil && vc.Ready)
+		log.Printf("playNextTrack: Conditions not met for playback - vc is nil")
 	}
 }
 
