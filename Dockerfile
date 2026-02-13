@@ -1,7 +1,8 @@
 # Multi-stage Dockerfile for Oxide Music Bot with updated dependencies
 
 # Build stage
-FROM golang:1.24-alpine AS builder
+# Build stage
+FROM golang:1.23-alpine AS builder
 
 # Install dependencies needed for building
 RUN apk add --no-cache git ca-certificates gcc musl-dev opus-dev pkgconfig
@@ -24,7 +25,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -o oxide-music-bot .
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.20
 
 # Install packages needed at runtime
 RUN apk --no-cache add \
