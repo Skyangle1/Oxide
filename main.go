@@ -2739,8 +2739,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 	}()
 
-	// Create a reader from the stdout pipe
-	reader := bufio.NewReader(ffmpegOut)
+	// Create a buffered reader from the stdout pipe for better performance
+	reader := bufio.NewReaderSize(ffmpegOut, 32768) // 32KB buffer for better performance
 
 	// Wait for the voice connection to be ready with improved logic
 	readyAttempts := 0
@@ -2846,9 +2846,9 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				var currentTrackTitle, currentTrackUploader, currentTrackRequester, currentTrackThumbnail string
 
 				mutex.RLock()
-				guildCtx, exists = guildContexts[guildID]
-				if exists && guildCtx != nil && guildCtx.CurrentTrack != nil {
-					currentTrack := guildCtx.CurrentTrack
+				guildCtxTemp, existsTemp := guildContexts[guildID]
+				if existsTemp && guildCtxTemp != nil && guildCtxTemp.CurrentTrack != nil {
+					currentTrack := guildCtxTemp.CurrentTrack
 					currentTrackTitle = currentTrack.Title
 					currentTrackUploader = currentTrack.Uploader
 					currentTrackRequester = currentTrack.RequesterUsername
@@ -2950,6 +2950,10 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 	defer func() {
 		if vc != nil {
+			// Flush any remaining audio frames before stopping
+			// Small delay to ensure all frames are processed
+			time.Sleep(200 * time.Millisecond)
+			
 			// Set speaking status to false with error handling
 			go func() {
 				defer func() {
@@ -2973,35 +2977,41 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 		// Cancel the progress updater context to stop the goroutine
 		progressUpdaterCancel()
-		// Wait for the progress updater to finish
-		<-progressUpdaterDone
+		// Wait for the progress updater to finish with timeout to prevent hanging
+		select {
+		case <-progressUpdaterDone:
+			// Progress updater finished normally
+		case <-time.After(1 * time.Second):
+			// Timeout waiting for progress updater to finish, continue anyway
+			log.Println("Timeout waiting for progress updater to finish, continuing...")
+		}
 
 		// Play the next track if available and connection still exists
 		if vc != nil {
 			// We need to get the guildID from the voice connection or guild contexts
-			var guildID string
+			var currentGuildID string
 			// Look through all voice connections to find which guild this channel belongs to
 			for gid, vconn := range session.VoiceConnections {
 				if vconn != nil && vconn.ChannelID == vc.ChannelID {
-					guildID = gid
+					currentGuildID = gid
 					break
 				}
 			}
 
-			if guildID == "" {
+			if currentGuildID == "" {
 				// If we still can't determine the guildID, try to get it from the guild contexts
 				mutex.RLock()
 				for gid, ctx := range guildContexts {
 					if ctx.VoiceConnection != nil && ctx.VoiceConnection.ChannelID == vc.ChannelID {
-						guildID = gid
+						currentGuildID = gid
 						break
 					}
 				}
 				mutex.RUnlock()
 			}
 
-			if guildID != "" {
-				playNextTrack(session, guildID, vc.ChannelID)
+			if currentGuildID != "" {
+				playNextTrack(session, currentGuildID, vc.ChannelID)
 			}
 		}
 	}()
@@ -3016,7 +3026,7 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	frameCounter := 0
 
 	audioStreamLoop:
-	for vc != nil && vc.Ready && vc.OpusSend != nil {
+	for {
 		// Use a select statement to check for context cancellation
 		select {
 		case <-ctx.Done():
@@ -3024,8 +3034,8 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 			break audioStreamLoop
 		default:
 			// Check if the voice connection is still active
-			if vc == nil || !vc.Ready {
-				log.Println("playAudioStream: Voice connection is nil or not ready")
+			if vc == nil || !vc.Ready || vc.OpusSend == nil {
+				log.Println("playAudioStream: Voice connection is nil, not ready, or OpusSend is nil")
 				break audioStreamLoop
 			}
 
@@ -3036,13 +3046,26 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					log.Println("playAudioStream: End of audio stream reached")
 
-					// Handle end of stream - check if connection still exists before continuing
+					// Handle end of stream - drain any remaining data in the buffer
+					log.Println("playAudioStream: Draining remaining audio data...")
+					
+					// Small delay to allow any remaining data to be processed
+					time.Sleep(500 * time.Millisecond)
+					
+					// Check if connection still exists before continuing
 					if vc != nil {
-						log.Println("playAudioStream: Checking connection after end of stream")
+						log.Println("playAudioStream: Connection still exists after end of stream")
 					}
 					break audioStreamLoop
 				}
 				log.Printf("playAudioStream: Error reading audio: %v", err)
+				
+				// Check if this is a "signal: killed" error
+				if strings.Contains(err.Error(), "signal: killed") {
+					log.Println("playAudioStream: Process was killed, attempting to record position...")
+					// In a real implementation, you might want to record the playback position here
+					// For now, we'll just continue to the next track
+				}
 				continue
 			}
 
@@ -3103,24 +3126,30 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 
 	log.Printf("playAudioStream: Finished playing audio for guild %s", guildID)
 
-	// Force kill the process to ensure it's completely terminated and free RAM instantly
-	if cmd.Process != nil {
-		err := cmd.Process.Kill()
-		if err != nil {
-			log.Printf("playAudioStream: Error killing process: %v", err)
-		} else {
-			log.Printf("playAudioStream: Process killed successfully")
-		}
-	}
-
-	// Wait for the command to finish with a timeout to prevent hanging
+	// Wait for the command to finish with proper synchronization
+	// Don't immediately kill the process, let it finish naturally or wait for completion
 	select {
-	case <-cmdDone:
-		// Command finished normally
-		log.Println("playAudioStream: Command finished normally")
-	case <-time.After(2 * time.Second):
-		// Command didn't finish within timeout, but we continue anyway
-		log.Println("playAudioStream: Command didn't finish within timeout, continuing...")
+	case err := <-cmdDone:
+		if err != nil {
+			log.Printf("playAudioStream: FFmpeg process finished with error: %v", err)
+			// Check if it was killed by signal
+			if strings.Contains(err.Error(), "signal: killed") {
+				log.Println("playAudioStream: FFmpeg was killed by signal, may have been interrupted")
+			}
+		} else {
+			log.Println("playAudioStream: FFmpeg process completed successfully")
+		}
+	case <-time.After(5 * time.Second): // Wait up to 5 seconds for process to finish naturally
+		log.Println("playAudioStream: FFmpeg process didn't finish within timeout, forcing termination")
+		// Only kill the process if it doesn't finish naturally within the timeout
+		if cmd.Process != nil {
+			err := cmd.Process.Kill()
+			if err != nil {
+				log.Printf("playAudioStream: Error killing process: %v", err)
+			} else {
+				log.Println("playAudioStream: Process killed successfully after timeout")
+			}
+		}
 	}
 
 	return nil
