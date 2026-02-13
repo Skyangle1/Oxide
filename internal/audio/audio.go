@@ -40,18 +40,25 @@ var (
 	Mutex         sync.RWMutex
 )
 
-// GetYoutubeInfoWithContext gets video info using yt-dlp with context timeout
-func GetYoutubeInfoWithContext(ctx context.Context, url string) (*models.Track, error) {
-	log.Printf("getYoutubeInfo: Processing URL: %s", url)
+// GetTrackInfoWithContext gets track info using yt-dlp with context timeout.
+// It supports both direct URLs (YouTube, SoundCloud, etc.) and search queries.
+func GetTrackInfoWithContext(ctx context.Context, input string) (*models.Track, error) {
+	log.Printf("GetTrackInfo: Processing input: %s", input)
 
-	// Sanitize the URL to prevent command injection
-	sanitizedURL := utils.SanitizeURL(url)
-	if sanitizedURL == "" {
-		log.Printf("getYoutubeInfo: Invalid URL provided: %s", url)
-		return nil, fmt.Errorf("invalid URL provided")
+	var query string
+	// Check if input is a URL
+	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+		query = utils.SanitizeURL(input)
+		if query == "" {
+			log.Printf("GetTrackInfo: Invalid URL provided: %s", input)
+			return nil, fmt.Errorf("invalid URL provided")
+		}
+	} else {
+		// It's a search query
+		query = "ytsearch1:" + input
 	}
 
-	log.Printf("getYoutubeInfo: Sanitized URL: %s", sanitizedURL)
+	log.Printf("GetTrackInfo: Final query: %s", query)
 
 	// Create the command with context and additional flags
 	cmd := exec.CommandContext(ctx, "/usr/bin/yt-dlp",
@@ -60,9 +67,10 @@ func GetYoutubeInfoWithContext(ctx context.Context, url string) (*models.Track, 
 		"--no-check-certificate",
 		"--no-warnings",
 		"--flat-playlist",
+		"--default-search", "ytsearch", // Ensure search works if prefix fails for some reason
 		"-4", // Force IPv4
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-		sanitizedURL)
+		query)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
@@ -71,36 +79,36 @@ func GetYoutubeInfoWithContext(ctx context.Context, url string) (*models.Track, 
 	err := cmd.Run()
 	if err != nil {
 		stderrContent := stderrBuf.String()
-		log.Printf("getYoutubeInfo: Error getting video info from yt-dlp: %v", err)
-		log.Println("getYoutubeInfo: yt-dlp stderr: " + stderrContent)
+		log.Printf("GetTrackInfo: Error getting track info from yt-dlp: %v", err)
+		log.Println("GetTrackInfo: yt-dlp stderr: " + stderrContent)
 
 		// Check for specific error conditions
 		if strings.Contains(stderrContent, "Unsupported URL") {
-			return nil, fmt.Errorf("unsupported URL: %s", sanitizedURL)
+			return nil, fmt.Errorf("unsupported input: %s", input)
 		} else if strings.Contains(stderrContent, "This video is unavailable") {
-			return nil, fmt.Errorf("video unavailable: %s", sanitizedURL)
+			return nil, fmt.Errorf("media unavailable: %s", input)
 		} else if strings.Contains(stderrContent, "Sign in to confirm your age") {
-			return nil, fmt.Errorf("age restricted video: %s", sanitizedURL)
+			return nil, fmt.Errorf("age restricted content: %s", input)
 		} else if strings.Contains(stderrContent, "This live event will begin in") {
-			return nil, fmt.Errorf("scheduled live event: %s", sanitizedURL)
+			return nil, fmt.Errorf("scheduled live event: %s", input)
 		}
 
-		return nil, fmt.Errorf("error getting video info: %v, stderr: %s", err, stderrContent)
+		return nil, fmt.Errorf("error getting track info: %v", err)
 	}
 
 	output := stdoutBuf.Bytes()
 
 	// Validate output before parsing JSON
 	if len(output) == 0 {
-		log.Printf("getYoutubeInfo: Empty output from yt-dlp")
-		return nil, fmt.Errorf("empty output from yt-dlp for URL: %s", sanitizedURL)
+		log.Printf("GetTrackInfo: Empty output from yt-dlp")
+		return nil, fmt.Errorf("no results found for: %s", input)
 	}
 
 	// Check if output starts with unexpected character
 	if len(output) > 0 && output[0] != '{' {
 		outputStr := string(output)
-		log.Printf("getYoutubeInfo: Unexpected output format, starts with: '%c', full output: %s", output[0], outputStr)
-		return nil, fmt.Errorf("unexpected output format from yt-dlp: %s", outputStr)
+		log.Printf("GetTrackInfo: Unexpected output format, starts with: '%c', full output: %s", output[0], outputStr)
+		return nil, fmt.Errorf("unexpected output format from yt-dlp")
 	}
 
 	var info struct {
@@ -112,21 +120,19 @@ func GetYoutubeInfoWithContext(ctx context.Context, url string) (*models.Track, 
 	}
 
 	if err := json.Unmarshal(output, &info); err != nil {
-		log.Printf("getYoutubeInfo: Error parsing video info JSON: %v", err)
-		log.Printf("getYoutubeInfo: Raw output was: %s", string(output))
-		return nil, fmt.Errorf("error parsing video info: %v", err)
+		log.Printf("GetTrackInfo: Error parsing JSON: %v", err)
+		return nil, fmt.Errorf("error parsing track info")
 	}
 
 	// Validate that we got meaningful data
 	if info.Title == "" {
-		return nil, fmt.Errorf("could not retrieve title for URL: %s", sanitizedURL)
+		return nil, fmt.Errorf("could not retrieve title for: %s", input)
 	}
 
 	// Format duration
 	durationStr := utils.FormatDuration(info.Duration)
 
-	log.Printf("yt-dlp berhasil dapet link: %s", info.WebpageURL)
-	log.Printf("getYoutubeInfo: Successfully retrieved info for '%s'", info.Title)
+	log.Printf("GetTrackInfo: Successfully retrieved info for '%s' (%s)", info.Title, info.WebpageURL)
 
 	return &models.Track{
 		Title:     info.Title,

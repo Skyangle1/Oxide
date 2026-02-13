@@ -231,9 +231,11 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
-			track, err := audio.GetYoutubeInfoWithContext(ctx, query)
+			s.ChannelMessageSend(m.ChannelID, "🔍 Searching...")
+
+			track, err := audio.GetTrackInfoWithContext(ctx, query)
 			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error finding track: %v", err))
 				return
 			}
 
