@@ -1238,6 +1238,12 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if currentVc.OpusSend != nil {
 			// Create a temporary channel to drain any remaining data
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("Recovered from panic in audio stream drain: %v", r)
+					}
+				}()
+				
 				// Drain the OpusSend channel to prevent blocking
 				for {
 					select {
@@ -1254,8 +1260,28 @@ func handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			}()
 
 			// Close the OpusSend channel to stop the current stream
-			close(currentVc.OpusSend)
-			currentVc.OpusSend = nil
+			// Use a sync.Once-like approach to ensure it's only closed once
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("Recovered from panic when closing OpusSend: %v", r)
+					}
+				}()
+				
+				// Check if channel is already closed before attempting to close
+				select {
+				case _, ok := <-currentVc.OpusSend:
+					if !ok {
+						// Channel is already closed, nothing to do
+						return
+					}
+				default:
+					// Channel is open, safe to close
+				}
+				
+				close(currentVc.OpusSend)
+				currentVc.OpusSend = nil
+			}()
 		}
 	}
 
@@ -3113,6 +3139,13 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 					}
 					break audioStreamLoop
 				}
+				
+				// Check if this is a closed pipe error (common when skipping/stopping)
+				if err == io.ErrClosedPipe || strings.Contains(err.Error(), "file already closed") || strings.Contains(err.Error(), "broken pipe") {
+					log.Println("playAudioStream: Audio pipe closed, stopping playback gracefully")
+					break audioStreamLoop
+				}
+				
 				log.Printf("playAudioStream: Error reading audio: %v", err)
 				
 				// Check if this is a "signal: killed" error
