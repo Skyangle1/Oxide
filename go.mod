@@ -1,4 +1,4 @@
-module oxide-music-bot
+module kingmyralune/oxide-music-bot
 
 go 1.24.0
 
