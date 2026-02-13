@@ -60,6 +60,7 @@ type GuildContext struct {
 	StartTime       time.Time // Time when the current track started playing
 	LastMessageID   string    // ID of the last "Now Playing" message
 	LastChannelID   string    // Channel ID of the last "Now Playing" message
+	IsPaused        bool      // Tracks if the playback is currently paused
 }
 
 // RateLimiter tracks user requests to prevent abuse (interface or implementation can go here too if needed everywhere)

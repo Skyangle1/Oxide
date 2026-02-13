@@ -13,6 +13,7 @@ import (
 	"kingmyralune/oxide-music-bot/internal/audio"
 	"kingmyralune/oxide-music-bot/internal/config"
 	"kingmyralune/oxide-music-bot/internal/models"
+	"kingmyralune/oxide-music-bot/internal/utils"
 )
 
 type Bot struct {
@@ -184,7 +185,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	lowerContent := strings.ToLower(m.Content)
 
-	if strings.HasPrefix(lowerContent, "lyre") || strings.HasPrefix(lowerContent, "queen") {
+	if strings.HasPrefix(lowerContent, "lyre") {
 		if !b.Config.AllowedUserIDs[m.Author.ID] {
 			s.ChannelMessageSend(m.ChannelID, "🎵 **Melodi Ini Adalah Warisan** 🎵\n\n\"Melodi ini adalah warisan dari waktu yang dicuri dari tidur. Jangan merusak harmoni yang tak kau pahami prosesnya. Akses ditolak secara elegan.\"")
 			return
@@ -192,19 +193,115 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 		b.updateUserStats(m.Author.ID)
 
-		if strings.HasPrefix(lowerContent, "lyre play") || strings.HasPrefix(lowerContent, "queen play") {
+		// Check if just "lyre"
+		if strings.TrimSpace(lowerContent) == "lyre" {
+			msg := utils.GetRandomSweetMessage()
+			s.ChannelMessageSend(m.ChannelID, msg)
+			return
+		}
+
+		if strings.HasPrefix(lowerContent, "lyre play") {
 			RateLimiterInstance.AddRequest(m.Author.ID)
 			if RateLimiterInstance.IsLimited(m.Author.ID) {
 				s.ChannelMessageSend(m.ChannelID, "❌ Terlalu banyak permintaan! Harap tunggu sebentar sebelum meminta lagu lagi.")
 				return
 			}
 
-			// Process play command (simplified for brevity, main logic in interaction)
 			parts := strings.Fields(m.Content)
 			if len(parts) < 3 {
-				s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query using /oxide-play command for better experience.")
+				s.ChannelMessageSend(m.ChannelID, "Please provide a URL or search query.")
 				return
 			}
+
+			query := strings.Join(parts[2:], " ")
+
+			// Get Voice State
+			voiceState, err := audio.GetVoiceState(s, m.Author.ID, m.GuildID)
+			if err != nil {
+				s.ChannelMessageSend(m.ChannelID, "You must be connected to a voice channel.")
+				return
+			}
+
+			// Get info
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			track, err := audio.GetYoutubeInfoWithContext(ctx, query)
+			if err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error getting track info: %v", err))
+				return
+			}
+
+			track.RequesterID = m.Author.ID
+			track.RequesterUsername = m.Author.Username
+
+			// Add to queue
+			audio.Mutex.Lock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			if !exists {
+				guildCtx = &models.GuildContext{
+					MusicQueue: &models.MusicQueue{},
+				}
+				audio.GuildContexts[m.GuildID] = guildCtx
+			}
+			if guildCtx.MusicQueue == nil {
+				guildCtx.MusicQueue = &models.MusicQueue{}
+			}
+
+			guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
+			audio.Mutex.Unlock()
+
+			// Check if playing
+			shouldPlay := false
+			audio.Mutex.RLock()
+			if guildCtx.CurrentTrack == nil && (guildCtx.MusicQueue == nil || len(guildCtx.MusicQueue.Tracks) <= 1) {
+				shouldPlay = true
+			}
+			audio.Mutex.RUnlock()
+
+			if shouldPlay {
+				audio.PlayNextTrack(s, m.GuildID, voiceState.ChannelID)
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Now playing: `%s`", track.Title))
+			} else {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added `%s` to queue.", track.Title))
+			}
+		} else if strings.HasPrefix(lowerContent, "lyre skip") {
+			// Basic skip implementation for text command
+			audio.Mutex.Lock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			if exists && guildCtx != nil {
+				guildCtx.CurrentTrack = nil
+			}
+			audio.Mutex.Unlock()
+
+			vc, err := audio.GetConnectedVoiceConnection(s, m.GuildID)
+			if err == nil && vc != nil && vc.OpusSend != nil {
+				close(vc.OpusSend)
+				vc.OpusSend = nil
+			}
+
+			if vc != nil {
+				audio.PlayNextTrack(s, m.GuildID, vc.ChannelID)
+			}
+			s.ChannelMessageSend(m.ChannelID, "Skipped current track.")
+		} else if strings.HasPrefix(lowerContent, "lyre stop") {
+			audio.Mutex.Lock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			if exists && guildCtx != nil {
+				guildCtx.MusicQueue.Tracks = nil
+				guildCtx.CurrentTrack = nil
+			}
+			audio.Mutex.Unlock()
+
+			vc, err := audio.GetConnectedVoiceConnection(s, m.GuildID)
+			if err == nil && vc != nil {
+				if vc.OpusSend != nil {
+					close(vc.OpusSend)
+					vc.OpusSend = nil
+				}
+				vc.Disconnect()
+			}
+			s.ChannelMessageSend(m.ChannelID, "Stopped playback and cleared queue.")
 		}
 	}
 }
@@ -265,11 +362,28 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 
 func (b *Bot) handlePauseResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "⏸️ Pause/Resume functionality is currently being enhanced and will be available soon!",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
+
+	// Toggle pause state
+	audio.Mutex.Lock()
+	guildCtx, exists := audio.GuildContexts[i.GuildID]
+	isPaused := false
+	if exists && guildCtx != nil {
+		guildCtx.IsPaused = !guildCtx.IsPaused
+		isPaused = guildCtx.IsPaused
+	}
+	audio.Mutex.Unlock()
+
+	status := "Resumed"
+	if isPaused {
+		status = "Paused"
+	}
+
+	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("Playback %s ⏯️", status),
+		Flags:   discordgo.MessageFlagsEphemeral,
 	})
 }
 

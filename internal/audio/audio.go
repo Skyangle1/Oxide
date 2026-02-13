@@ -363,7 +363,7 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 	}
 
 	if !connectionReady {
-		log.Println("Warning: Voice connection is not ready, this may cause issues")
+		log.Println("Warning: Voice connection might not be perfectly ready, but proceeding to maintain stream continuity.")
 	} else {
 		log.Println("Voice connection is ready")
 	}
@@ -373,9 +373,11 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 
 	HandleEncryptionMode(vc)
 
-	if vc == nil || !vc.Ready {
-		log.Println("KRITIS: voiceConnection still not ready! Cannot proceed with playback.")
+	if vc == nil {
+		log.Println("KRITIS: voiceConnection is nil! Cannot proceed.")
 		return
+	} else if !vc.Ready {
+		log.Println("Warning: voiceConnection.Ready is false, but forcing playback attempt for smooth transition.")
 	}
 
 	Mutex.RLock()
@@ -803,7 +805,30 @@ audioStreamLoop:
 				break audioStreamLoop
 			}
 
-			// Clear buffer
+			// Check pause state
+			Mutex.RLock()
+			guildCtx, exists := GuildContexts[guildID]
+			isPaused := false
+			if exists && guildCtx != nil {
+				isPaused = guildCtx.IsPaused
+			}
+			Mutex.RUnlock()
+
+			if isPaused {
+				// Send silence frame to keep connection alive
+				// Encode silence
+				opusSilence, err := enc.Encode(make([]int16, 960*2), 960, 4000)
+				if err == nil && vc.OpusSend != nil {
+					select {
+					case vc.OpusSend <- opusSilence:
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+
+			// Clear buffer and read audio
 			for i := range audioBytes {
 				audioBytes[i] = 0
 			}
@@ -811,8 +836,11 @@ audioStreamLoop:
 			n, err := io.ReadFull(reader, audioBytes)
 			if err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					time.Sleep(500 * time.Millisecond)
-					break audioStreamLoop
+					// Only break if we are truly at end of stream and not just paused
+					if !isPaused {
+						time.Sleep(500 * time.Millisecond)
+						break audioStreamLoop
+					}
 				}
 				continue
 			}

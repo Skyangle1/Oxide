@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // SanitizeURL sanitizes the URL to prevent command injection
@@ -112,7 +113,43 @@ func CreateProgressBar(currentTime, totalTime int) string {
 	return bar + "\n" + strings.Join(indicatorPos, "")
 }
 
-// StringPtr Helper function to create string pointers for Discord API
-func StringPtr(s string) *string {
-	return &s
+// GetRandomSweetMessage returns a random sweet message
+func GetRandomSweetMessage() string {
+	messages := []string{
+		"Apa kabar, Sayang? 🌸",
+		"Aku di sini untukmu. Selalu. 💖",
+		"Melodi ini tak seindah senyummu. 🎶",
+		"Kamu adalah notasi terindah dalam hidupku. 🎼",
+		"Biarkan aku memelukmu dengan lagu ini. 🤗",
+		"Hai, alasan aku bernyanyi. ✨",
+		"Setiap detak jantungku berirama namamu. 💓",
+		"Dunia sunyi tanpamu, Sayang. 🌑",
+		"Kamu minta lagu apa? Atau minta hatiku? 😉",
+		"Lelah? Sini istirahat sambil dengerin musik. 🛌",
+	}
+
+	// Using a simple pseudo-random selection based on time for variety
+	// For better randomness, we could use math/rand, but this is sufficient for flavor text
+	// and improved in newer Go versions.
+	// Note: In Go 1.20+, math/rand is seeded automatically.
+	// For older versions, we might need seeding, but let's assume modern Go given go.mod says 1.24
+	// However, since we didn't import math/rand, let's just pick one based on time nanoseconds
+	// to avoid extra imports if possible, OR just use math/rand with import.
+	// Let's use time based index for simplicity if avoiding imports,
+	// BUT utils already imports time (indirectly? no). Utils imports fmt, net/url, regexp, strings.
+	// I need to import time and math/rand properly if I want to use them.
+	// Let's check imports in utils again.
+	// It does not import time or math/rand.
+	// I will add imports in a separate step or just use a simple rotation map/counter if I could,
+	// but random is better.
+	// I will use crypto/rand or just time.Now().UnixNano() % len messages.
+	// Utils doesn't import time. I need to add it.
+
+	// Waiting for next step to fix imports if I break them.
+	// Actually I can just rely on the user to fix or I can do it right now.
+	// I'll assume I can just add the function and then fix imports if needed.
+	// Actually, let's use a determinstic simple way or just add imports now.
+	// I'll stick to valid Go.
+
+	return messages[time.Now().UnixNano()%int64(len(messages))]
 }
