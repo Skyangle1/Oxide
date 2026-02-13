@@ -72,6 +72,43 @@ var (
 	statsMutex sync.RWMutex
 )
 
+// cleanupInactiveUsers periodically removes inactive users from userStats
+func cleanupInactiveUsers() {
+	ticker := time.NewTicker(1 * time.Hour) // Run cleanup every hour
+	defer ticker.Stop()
+
+	for range ticker.C {
+		log.Println("Starting user stats cleanup...")
+		
+		// Calculate the cutoff time (24 hours ago)
+		cutoffTime := time.Now().Add(-24 * time.Hour)
+		
+		// Collect user IDs to remove
+		usersToRemove := []string{}
+		
+		statsMutex.RLock()
+		for userID, userStat := range userStats {
+			if userStat != nil && userStat.LastActivity.Before(cutoffTime) {
+				usersToRemove = append(usersToRemove, userID)
+			}
+		}
+		statsMutex.RUnlock()
+		
+		// Remove inactive users
+		if len(usersToRemove) > 0 {
+			statsMutex.Lock()
+			for _, userID := range usersToRemove {
+				delete(userStats, userID)
+			}
+			statsMutex.Unlock()
+			
+			log.Printf("Removed %d inactive users from stats", len(usersToRemove))
+		} else {
+			log.Println("No inactive users to remove")
+		}
+	}
+}
+
 // MusicQueue represents a queue of tracks
 type MusicQueue struct {
 	Tracks []*Track
@@ -100,6 +137,12 @@ var (
 var (
 	roomGuardMode  = make(map[string]bool) // Maps guildID to guard mode status
 	guardModeMutex sync.RWMutex
+)
+
+// Global concurrency limit for audio streams
+var (
+	maxConcurrentStreams = 5  // Maximum 5 concurrent audio streams globally
+	streamSem            = make(chan struct{}, maxConcurrentStreams)  // Semaphore to limit concurrent streams
 )
 
 // RateLimiter tracks user requests to prevent abuse
@@ -232,6 +275,9 @@ func main() {
 
 	// Start voice connection health check routine
 	go voiceConnectionHealthCheck()
+
+	// Start user stats cleanup routine
+	go cleanupInactiveUsers()
 
 	// Start message cleanup routine
 	go cleanupOldMessages()
@@ -2688,15 +2734,19 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 	volume := prefs.Volume
 
 	// Create the ffmpeg command with context for proper cancellation
+	// Using optimized flags for lower CPU usage
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
+		"-threads", "1", // Limit threads to reduce CPU usage
 		"-i", directURL,
 		"-filter:a", fmt.Sprintf("volume=%.2f", volume), // Apply user's volume preference
 		"-f", "s16le",
 		"-ar", "48000",
 		"-ac", "2",
+		"-preset", "ultrafast", // Use ultrafast preset to reduce CPU usage
+		"-c:a", "pcm_s16le", // Explicitly set audio codec
 		"-loglevel", "error", // Show only errors
 		"pipe:1")
 
@@ -3016,8 +3066,9 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 		}
 	}()
 
-	// Buffer for audio frames - exact size for stereo 16-bit PCM
-	pcmBuf := make([]int16, 960*2) // 960 samples * 2 channels
+	// Pre-allocate buffers outside the loop to reduce GC pressure
+	audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo) - buffer for audio frames
+	pcmBuf := make([]int16, 960*2) // 960 samples * 2 channels - buffer for PCM samples
 
 	// Create a ticker for timing audio frames (20ms per frame for 48kHz sample rate)
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -3039,8 +3090,12 @@ func playAudioStream(vc *discordgo.VoiceConnection, url string, guildID string, 
 				break audioStreamLoop
 			}
 
+			// Reset the buffer before reading to ensure clean data
+			for i := range audioBytes {
+				audioBytes[i] = 0
+			}
+			
 			// Read audio frame from ffmpeg (16-bit PCM, 48000Hz, stereo) - 3840 bytes
-			audioBytes := make([]byte, 3840) // 960 samples * 2 bytes per sample * 2 channels (stereo)
 			n, err := io.ReadFull(reader, audioBytes)
 			if err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -3163,11 +3218,56 @@ func playNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		return
 	}
 
+	// Acquire a slot from the global stream semaphore
+	select {
+	case streamSem <- struct{}{}: // Acquire a slot
+		// Got permission to start a stream, continue
+		log.Printf("Acquired stream slot for guild %s, active streams: %d/%d", guildID, len(streamSem), cap(streamSem))
+	default:
+		// No slots available, send a polite message and return
+		log.Printf("Maximum concurrent streams reached (%d), rejecting playback for guild %s", maxConcurrentStreams, guildID)
+		
+		// Try to send a message to the text channel about the limit
+		// Get the guild to find a text channel
+		guild, err := s.State.Guild(guildID)
+		if err == nil && guild != nil {
+			for _, channel := range guild.Channels {
+				if channel.Type == discordgo.ChannelTypeGuildText {
+					// Send a polite message about the stream limit
+					s.ChannelMessageSend(channel.ID, fmt.Sprintf("⏸️ Maaf, jumlah maksimum stream (%d) telah tercapai. Harap tunggu hingga salah satu server selesai memutar lagu.", maxConcurrentStreams))
+					break
+				}
+			}
+		}
+		return
+	}
+
 	// Recover from panic with stack trace
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Recovered from panic in playNextTrack: %v", r)
 			log.Printf("Stack trace:\n%s", debug.Stack())
+			// Release the stream slot when function exits
+			select {
+			case <-streamSem:
+				// Released the slot
+				log.Printf("Released stream slot after panic in guild %s", guildID)
+			default:
+				// Semaphore is already empty, this shouldn't happen
+				log.Printf("Warning: Tried to release stream slot but semaphore was empty for guild %s", guildID)
+			}
+		}
+	}()
+
+	// Release the stream slot when the function exits (when audio finishes)
+	defer func() {
+		select {
+		case <-streamSem:
+			// Released the slot
+			log.Printf("Released stream slot for guild %s", guildID)
+		default:
+			// Semaphore is already empty, this shouldn't happen
+			log.Printf("Warning: Tried to release stream slot but semaphore was empty for guild %s", guildID)
 		}
 	}()
 
