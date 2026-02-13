@@ -136,32 +136,8 @@ func (b *Bot) cleanupInactiveUsers() {
 func (b *Bot) registerCommands() {
 	commands := []*discordgo.ApplicationCommand{
 		{
-			Name:        "oxide-play",
-			Description: "Play a song from YouTube or other supported platforms",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "query",
-					Description: "URL or search query for the song",
-					Required:    true,
-				},
-			},
-		},
-		{
-			Name:        "oxide-skip",
-			Description: "Skip the current song",
-		},
-		{
-			Name:        "oxide-stop",
-			Description: "Stop playback and clear the queue",
-		},
-		{
-			Name:        "oxide-queue",
-			Description: "Show the current music queue",
-		},
-		{
-			Name:        "oxide-nowplaying",
-			Description: "Show the currently playing track",
+			Name:        "oxide-help",
+			Description: "Show help for Queen's Lɣre commands",
 		},
 	}
 
@@ -170,12 +146,41 @@ func (b *Bot) registerCommands() {
 		botAppID = b.Config.ApplicationID
 	}
 
-	for _, command := range commands {
-		_, err := b.Session.ApplicationCommandCreate(botAppID, "", command)
-		if err != nil {
-			log.Printf("Cannot create command %v: %v", command.Name, err)
-		}
+	// Bulk overwrite commands to remove old ones globally
+	_, err := b.Session.ApplicationCommandBulkOverwrite(botAppID, "", commands)
+	if err != nil {
+		log.Printf("Cannot register commands: %v", err)
 	}
+}
+
+func (b *Bot) handleHelpCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	embed := &discordgo.MessageEmbed{
+		Title:       "📜 Queen's Lɣre Command Guide",
+		Description: "Here are the available commands. Use `lyre` prefix for everything!",
+		Color:       0xFF69B4, // Hot Pink
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "🎵 Music Commands",
+				Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song",
+				Inline: false,
+			},
+			{
+				Name:   "✨ Fun",
+				Value:  "`lyre` - Get a sweet random message",
+				Inline: false,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Made with 💖 by KingMyraLune",
+		},
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+		},
+	})
 }
 
 func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -302,6 +307,86 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				vc.Disconnect()
 			}
 			s.ChannelMessageSend(m.ChannelID, "Stopped playback and cleared queue.")
+		} else if strings.HasPrefix(lowerContent, "lyre queue") {
+			audio.Mutex.RLock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			queueExists := exists && guildCtx.MusicQueue != nil && len(guildCtx.MusicQueue.Tracks) > 0
+			tracks := []*models.Track{}
+			if queueExists {
+				tracks = guildCtx.MusicQueue.Tracks[:]
+			}
+			audio.Mutex.RUnlock()
+
+			if len(tracks) == 0 {
+				s.ChannelMessageSend(m.ChannelID, "Queue is empty.")
+				return
+			}
+
+			var msg strings.Builder
+			msg.WriteString("**Music Queue:**\n")
+			for idx, track := range tracks {
+				msg.WriteString(fmt.Sprintf("%d. %s\n", idx+1, track.Title))
+			}
+			s.ChannelMessageSend(m.ChannelID, msg.String())
+
+		} else if strings.HasPrefix(lowerContent, "lyre nowplaying") || strings.HasPrefix(lowerContent, "lyre np") {
+			audio.Mutex.RLock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			var track *models.Track
+			if exists && guildCtx != nil {
+				track = guildCtx.CurrentTrack
+			}
+			audio.Mutex.RUnlock()
+
+			if track == nil {
+				s.ChannelMessageSend(m.ChannelID, "Nothing is playing.")
+				return
+			}
+
+			embed := &discordgo.MessageEmbed{
+				Title:       "Now Playing",
+				Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
+				Color:       0xFF69B4,
+				Fields: []*discordgo.MessageEmbedField{
+					{
+						Name:   "Duration",
+						Value:  track.Duration,
+						Inline: true,
+					},
+					{
+						Name:   "Requested by",
+						Value:  track.RequesterUsername,
+						Inline: true,
+					},
+				},
+			}
+			if track.Thumbnail != "" {
+				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: track.Thumbnail}
+			}
+			s.ChannelMessageSendEmbed(m.ChannelID, embed)
+
+		} else if strings.HasPrefix(lowerContent, "lyre help") {
+			embed := &discordgo.MessageEmbed{
+				Title:       "📜 Queen's Lɣre Command Guide",
+				Description: "Here are the available commands. Use `lyre` prefix for everything!",
+				Color:       0xFF69B4, // Hot Pink
+				Fields: []*discordgo.MessageEmbedField{
+					{
+						Name:   "🎵 Music Commands",
+						Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song",
+						Inline: false,
+					},
+					{
+						Name:   "✨ Fun",
+						Value:  "`lyre` - Get a sweet random message",
+						Inline: false,
+					},
+				},
+				Footer: &discordgo.MessageEmbedFooter{
+					Text: "Made with 💖 by KingMyraLune",
+				},
+			}
+			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 		}
 	}
 }
@@ -335,16 +420,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
 		switch i.ApplicationCommandData().Name {
-		case "oxide-play":
-			b.handlePlayCommand(s, i)
-		case "oxide-skip":
-			b.handleSkipCommand(s, i)
-		case "oxide-stop":
-			b.handleStopCommand(s, i)
-		case "oxide-queue":
-			b.handleQueueCommand(s, i)
-		case "oxide-nowplaying":
-			b.handleNowPlayingCommand(s, i)
+		case "oxide-help":
+			b.handleHelpCommand(s, i)
 		}
 	case discordgo.InteractionMessageComponent:
 		switch i.MessageComponentData().CustomID {
@@ -385,86 +462,6 @@ func (b *Bot) handlePauseResume(s *discordgo.Session, i *discordgo.InteractionCr
 		Content: fmt.Sprintf("Playback %s ⏯️", status),
 		Flags:   discordgo.MessageFlagsEphemeral,
 	})
-}
-
-func (b *Bot) handlePlayCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Rate limit check
-	RateLimiterInstance.AddRequest(i.Member.User.ID)
-	if RateLimiterInstance.IsLimited(i.Member.User.ID) {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ Terlalu banyak permintaan!",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
-		return
-	}
-
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-
-	query := i.ApplicationCommandData().Options[0].StringValue()
-
-	// Get Voice State
-	voiceState, err := audio.GetVoiceState(s, i.Member.User.ID, i.GuildID)
-	if err != nil {
-		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: "You must be connected to a voice channel.",
-		})
-		return
-	}
-
-	// Get info
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	track, err := audio.GetYoutubeInfoWithContext(ctx, query)
-	if err != nil {
-		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("Error getting track info: %v", err),
-		})
-		return
-	}
-
-	track.RequesterID = i.Member.User.ID
-	track.RequesterUsername = i.Member.User.Username
-
-	// Add to queue
-	audio.Mutex.Lock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
-	if !exists {
-		guildCtx = &models.GuildContext{
-			MusicQueue: &models.MusicQueue{},
-		}
-		audio.GuildContexts[i.GuildID] = guildCtx
-	}
-	if guildCtx.MusicQueue == nil {
-		guildCtx.MusicQueue = &models.MusicQueue{}
-	}
-
-	guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
-	audio.Mutex.Unlock()
-
-	// Check if playing
-	shouldPlay := false
-	audio.Mutex.RLock()
-	if guildCtx.CurrentTrack == nil && (guildCtx.MusicQueue == nil || len(guildCtx.MusicQueue.Tracks) <= 1) {
-		shouldPlay = true
-	}
-	audio.Mutex.RUnlock()
-
-	if shouldPlay {
-		audio.PlayNextTrack(s, i.GuildID, voiceState.ChannelID)
-		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("Now playing: `%s`", track.Title),
-		})
-	} else {
-		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("Added `%s` to queue.", track.Title),
-		})
-	}
 }
 
 func (b *Bot) handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -555,53 +552,5 @@ func (b *Bot) handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionC
 
 	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: msg.String(),
-	})
-}
-
-func (b *Bot) handleNowPlayingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-
-	audio.Mutex.RLock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
-	var track *models.Track
-	if exists && guildCtx != nil {
-		track = guildCtx.CurrentTrack
-	}
-	audio.Mutex.RUnlock()
-
-	if track == nil {
-		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-			Content: "Nothing is playing.",
-		})
-		return
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "Now Playing",
-		Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Duration",
-				Value:  track.Duration,
-				Inline: true,
-			},
-			{
-				Name:   "Requested by",
-				Value:  track.RequesterUsername,
-				Inline: true,
-			},
-		},
-	}
-
-	if track.Thumbnail != "" {
-		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
-			URL: track.Thumbnail,
-		}
-	}
-
-	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-		Embeds: []*discordgo.MessageEmbed{embed},
 	})
 }
