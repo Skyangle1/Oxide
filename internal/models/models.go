@@ -61,6 +61,7 @@ type GuildContext struct {
 	LastMessageID   string    // ID of the last "Now Playing" message
 	LastChannelID   string    // Channel ID of the last "Now Playing" message
 	IsPaused        bool      // Tracks if the playback is currently paused
+	AutoPlay        bool      // If true, auto-search related tracks when queue empties
 }
 
 // RateLimiter tracks user requests to prevent abuse (interface or implementation can go here too if needed everywhere)

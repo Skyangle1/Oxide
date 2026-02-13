@@ -87,6 +87,7 @@ func NewBot(cfg *config.Config) (*Bot, error) {
 func (b *Bot) Start() error {
 	b.Session.AddHandler(b.messageCreate)
 	b.Session.AddHandler(b.interactionCreate)
+	b.Session.AddHandler(b.voiceStateUpdate)
 	b.Session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
 
 	err := b.Session.Open()
@@ -364,6 +365,59 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			}
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 
+		} else if strings.HasPrefix(lowerContent, "lyre hug") {
+			// Parse mentioned user
+			if len(m.Mentions) == 0 {
+				s.ChannelMessageSend(m.ChannelID, "Siapa yang mau dipeluk? Mention orangnya dong! 🤗\nContoh: `lyre hug @sayang`")
+				return
+			}
+			target := m.Mentions[0]
+			gifURL := utils.GetHugGifURL()
+
+			embed := &discordgo.MessageEmbed{
+				Title:       fmt.Sprintf("💕 %s memeluk %s!", m.Author.Username, target.Username),
+				Description: "*pelukan hangat terkirim~* 🤗✨",
+				Color:       0xFF69B4,
+				Image: &discordgo.MessageEmbedImage{
+					URL: gifURL,
+				},
+				Footer: &discordgo.MessageEmbedFooter{
+					Text: "Queen's Lɣre୨ৎ⭑ | Spread love 💖",
+				},
+			}
+			s.ChannelMessageSendEmbed(m.ChannelID, embed)
+
+		} else if strings.HasPrefix(lowerContent, "lyre quote") {
+			quote := utils.GetRandomQuote()
+			embed := &discordgo.MessageEmbed{
+				Title:       "✨ Quote of the Moment",
+				Description: quote,
+				Color:       0x9B59B6,
+				Footer: &discordgo.MessageEmbedFooter{
+					Text: "Queen's Lɣre୨ৎ⭑ | Words of love 💫",
+				},
+			}
+			s.ChannelMessageSendEmbed(m.ChannelID, embed)
+
+		} else if strings.HasPrefix(lowerContent, "lyre autoplay") {
+			audio.Mutex.Lock()
+			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			if !exists {
+				guildCtx = &models.GuildContext{
+					MusicQueue: &models.MusicQueue{},
+				}
+				audio.GuildContexts[m.GuildID] = guildCtx
+			}
+			guildCtx.AutoPlay = !guildCtx.AutoPlay
+			autoPlayOn := guildCtx.AutoPlay
+			audio.Mutex.Unlock()
+
+			status := "OFF"
+			if autoPlayOn {
+				status = "ON"
+			}
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔄 **AutoPlay**: %s\nBot akan otomatis cari lagu mirip saat antrian habis.", status))
+
 		} else if strings.HasPrefix(lowerContent, "lyre stay") {
 			audio.GuardModeMutex.Lock()
 			currentMode := audio.RoomGuardMode[m.GuildID]
@@ -381,16 +435,21 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			embed := &discordgo.MessageEmbed{
 				Title:       "📜 Queen's Lɣre Command Guide",
 				Description: "Here are the available commands. Use `lyre` prefix for everything!",
-				Color:       0xFF69B4, // Hot Pink
+				Color:       0xFF69B4,
 				Fields: []*discordgo.MessageEmbedField{
 					{
 						Name:   "🎵 Music Commands",
-						Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song\n`lyre stay` - Toggle 24/7 Stay Mode",
+						Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song",
 						Inline: false,
 					},
 					{
-						Name:   "✨ Fun",
-						Value:  "`lyre` - Get a sweet random message",
+						Name:   "⚙️ Settings",
+						Value:  "`lyre stay` - Toggle 24/7 Stay Mode\n`lyre autoplay` - Toggle auto-play related songs",
+						Inline: false,
+					},
+					{
+						Name:   "✨ Fun & Social",
+						Value:  "`lyre` - Sweet random message\n`lyre hug @user` - Send a hug\n`lyre quote` - Random quote",
 						Inline: false,
 					},
 				},
@@ -557,4 +616,73 @@ func (b *Bot) handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionC
 	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: msg.String(),
 	})
+}
+
+// voiceStateUpdate handles voice channel events (welcome message)
+func (b *Bot) voiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
+	// Only trigger when a user JOINS a channel (BeforeUpdate was nil or different channel)
+	if v.ChannelID == "" {
+		return // User left a channel, ignore
+	}
+
+	// Don't greet the bot itself
+	if v.UserID == s.State.User.ID {
+		return
+	}
+
+	// Check if user just joined (wasn't in a channel before, or changed channels)
+	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID == v.ChannelID {
+		return // Same channel, not a new join
+	}
+
+	// Check if the bot is in the same channel
+	audio.Mutex.RLock()
+	guildCtx, exists := audio.GuildContexts[v.GuildID]
+	botInChannel := exists && guildCtx != nil && guildCtx.VoiceConnection != nil && guildCtx.VoiceConnection.ChannelID == v.ChannelID
+	audio.Mutex.RUnlock()
+
+	if !botInChannel {
+		return
+	}
+
+	// Get user info
+	user, err := s.User(v.UserID)
+	if err != nil {
+		return
+	}
+
+	// Find a text channel to send the welcome message
+	guild, err := s.State.Guild(v.GuildID)
+	if err != nil {
+		return
+	}
+
+	greetings := []string{
+		fmt.Sprintf("Hai %s! Selamat datang di voice~ 🎶💖", user.Username),
+		fmt.Sprintf("Yay! %s masuk! Mau dengerin lagu bareng? 🎵✨", user.Username),
+		fmt.Sprintf("Welcome %s~ Aku sudah menunggumu! 🌸", user.Username),
+		fmt.Sprintf("%s! Akhirnya kamu datang juga~ 💕", user.Username),
+	}
+	greeting := greetings[time.Now().UnixNano()%int64(len(greetings))]
+
+	// Send to the last known text channel, or find one
+	channelID := ""
+	audio.Mutex.RLock()
+	if guildCtx != nil && guildCtx.LastChannelID != "" {
+		channelID = guildCtx.LastChannelID
+	}
+	audio.Mutex.RUnlock()
+
+	if channelID == "" {
+		for _, ch := range guild.Channels {
+			if ch.Type == discordgo.ChannelTypeGuildText {
+				channelID = ch.ID
+				break
+			}
+		}
+	}
+
+	if channelID != "" {
+		s.ChannelMessageSend(channelID, greeting)
+	}
 }

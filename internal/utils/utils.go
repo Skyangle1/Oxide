@@ -153,3 +153,37 @@ func GetRandomSweetMessage() string {
 
 	return messages[time.Now().UnixNano()%int64(len(messages))]
 }
+
+// GetRandomQuote returns a random motivational/romantic quote
+func GetRandomQuote() string {
+	quotes := []string{
+		"\"Cinta itu bukan tentang menemukan orang yang sempurna, tapi belajar melihat orang yang tidak sempurna dengan cara yang sempurna.\" 💫",
+		"\"Dalam setiap akhir, ada awal yang baru menunggu.\" 🌅",
+		"\"Kamu tidak perlu menjadi sempurna untuk dicintai. Kamu hanya perlu menjadi dirimu sendiri.\" 🌸",
+		"\"Hal terbaik dalam hidup adalah orang-orang yang kamu cintai, tempat yang pernah kamu kunjungi, dan kenangan yang kamu buat.\" ✨",
+		"\"Jarak itu tidak berarti apa-apa ketika seseorang berarti segalanya.\" 💖",
+		"\"Kamu adalah alasan aku percaya pada keajaiban.\" 🦋",
+		"\"Setiap hari bersamamu adalah halaman baru dalam cerita cinta kita.\" 📖",
+		"\"Cinta sejati tidak pernah berakhir. Jika berakhir, itu bukan cinta sejati.\" 💕",
+		"\"Kamu bukan hanya mimpi indahku, kamu adalah kenyataan terindah yang pernah kumiliki.\" 🌙",
+		"\"Jangan pernah menyerah. Hal-hal besar butuh waktu.\" 🔥",
+		"\"Kekuatanmu lebih besar dari yang kamu bayangkan.\" 💪",
+		"\"Hidup ini singkat. Peluk orang yang kamu sayangi erat-erat.\" 🤗",
+	}
+	return quotes[time.Now().UnixNano()%int64(len(quotes))]
+}
+
+// GetHugGifURL returns a random anime hug GIF URL
+func GetHugGifURL() string {
+	gifs := []string{
+		"https://media.tenor.com/HQGW_yS3sJkAAAAC/anime-hug.gif",
+		"https://media.tenor.com/9e1aE-9vL7sAAAAC/anime-hug-anime.gif",
+		"https://media.tenor.com/we2Igdo0ZXEAAAAC/anime-hug.gif",
+		"https://media.tenor.com/BOdMgNQj1RwAAAAC/cute-kawai.gif",
+		"https://media.tenor.com/Y2MJrEAB3UIAAAAC/anime-hug-anime.gif",
+		"https://media.tenor.com/f7WpJLGB4ikAAAAC/hug-anime.gif",
+		"https://media.tenor.com/W1ESAj6zYaEAAAAC/anime-cuddle.gif",
+		"https://media.tenor.com/sIdbp9yqP28AAAAC/hug-anime.gif",
+	}
+	return gifs[time.Now().UnixNano()%int64(len(gifs))]
+}

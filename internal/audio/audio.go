@@ -197,7 +197,46 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 
 	// Check if queue is empty
 	if queue == nil || len(queue.Tracks) == 0 {
+		// Check autoplay before unlocking
+		autoPlay := guildCtx.AutoPlay
+		lastTrack := guildCtx.CurrentTrack
 		Mutex.Unlock()
+
+		// AutoPlay: search for a related track if enabled
+		if autoPlay && lastTrack != nil && lastTrack.Title != "" {
+			log.Printf("AutoPlay: Searching for track related to '%s'", lastTrack.Title)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Search for something related
+			searchQuery := lastTrack.Title + " similar"
+			newTrack, err := GetTrackInfoWithContext(ctx, searchQuery)
+			if err == nil && newTrack != nil {
+				newTrack.RequesterID = "autoplay"
+				newTrack.RequesterUsername = "AutoPlay 🔄"
+
+				// Add to queue and continue
+				Mutex.Lock()
+				if guildCtx.MusicQueue == nil {
+					guildCtx.MusicQueue = &models.MusicQueue{}
+				}
+				guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, newTrack)
+				Mutex.Unlock()
+
+				log.Printf("AutoPlay: Added '%s' to queue", newTrack.Title)
+
+				// Send notification to text channel
+				if guildCtx.LastChannelID != "" {
+					s.ChannelMessageSend(guildCtx.LastChannelID, fmt.Sprintf("🔄 **AutoPlay**: Menambahkan `%s` ke antrian", newTrack.Title))
+				}
+
+				// Recursively call PlayNextTrack to play the new track
+				PlayNextTrack(s, guildID, channelID)
+				return
+			} else {
+				log.Printf("AutoPlay: Could not find related track: %v", err)
+			}
+		}
 
 		// Queue is empty, disconnect from voice if no one else is listening
 		vc, err := GetConnectedVoiceConnection(s, guildID)
