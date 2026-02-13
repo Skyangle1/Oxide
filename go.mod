@@ -1,6 +1,6 @@
 module kingmyralune/oxide-music-bot
 
-go 1.24.0
+go 1.23.0
 
 require (
 	github.com/bwmarrin/discordgo v0.29.1-0.20251229161010-9f6aa8159fc6
