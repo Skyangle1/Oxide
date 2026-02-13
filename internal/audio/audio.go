@@ -40,6 +40,13 @@ var (
 	Mutex         sync.RWMutex
 )
 
+// SetRoomGuard toggles the room guard mode for a specific guild
+func SetRoomGuard(guildID string, enable bool) {
+	GuardModeMutex.Lock()
+	defer GuardModeMutex.Unlock()
+	RoomGuardMode[guildID] = enable
+}
+
 // GetTrackInfoWithContext gets track info using yt-dlp with context timeout.
 // It supports both direct URLs (YouTube, SoundCloud, etc.) and search queries.
 func GetTrackInfoWithContext(ctx context.Context, input string) (*models.Track, error) {

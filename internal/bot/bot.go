@@ -367,6 +367,19 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			}
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 
+		} else if strings.HasPrefix(lowerContent, "lyre stay") {
+			audio.GuardModeMutex.Lock()
+			currentMode := audio.RoomGuardMode[m.GuildID]
+			newMode := !currentMode
+			audio.RoomGuardMode[m.GuildID] = newMode
+			audio.GuardModeMutex.Unlock()
+
+			status := "OFF"
+			if newMode {
+				status = "ON"
+			}
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🛡️ **Room Guard / Stay Mode**: %s\nBot tidak akan disconnect otomatis saat antrian habis.", status))
+
 		} else if strings.HasPrefix(lowerContent, "lyre help") {
 			embed := &discordgo.MessageEmbed{
 				Title:       "📜 Queen's Lɣre Command Guide",
@@ -375,7 +388,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				Fields: []*discordgo.MessageEmbedField{
 					{
 						Name:   "🎵 Music Commands",
-						Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song",
+						Value:  "`lyre play [song/url]` - Play a song\n`lyre skip` - Skip current song\n`lyre stop` - Stop playback\n`lyre queue` - Show queue\n`lyre nowplaying` - Show playing song\n`lyre stay` - Toggle 24/7 Stay Mode",
 						Inline: false,
 					},
 					{
