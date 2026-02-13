@@ -286,10 +286,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				close(vc.OpusSend)
 				vc.OpusSend = nil
 			}
-
-			if vc != nil {
-				audio.PlayNextTrack(s, m.GuildID, vc.ChannelID)
-			}
+			// Note: PlayNextTrack is called automatically by playAudioStream's defer
 			s.ChannelMessageSend(m.ChannelID, "Skipped current track.")
 		} else if strings.HasPrefix(lowerContent, "lyre stop") {
 			audio.Mutex.Lock()
@@ -484,8 +481,6 @@ func (b *Bot) handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCr
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	// Validation logic (voice state check etc) omitted for brevity
-
 	audio.Mutex.Lock()
 	guildCtx, exists := audio.GuildContexts[i.GuildID]
 	if exists && guildCtx != nil {
@@ -495,15 +490,9 @@ func (b *Bot) handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCr
 
 	vc, err := audio.GetConnectedVoiceConnection(s, i.GuildID)
 	if err == nil && vc != nil && vc.OpusSend != nil {
-		// Stop current stream
+		// Stop current stream — playAudioStream defer will auto-advance
 		close(vc.OpusSend)
 		vc.OpusSend = nil
-	}
-
-	// Play next
-	// We need channel ID, could get from VC
-	if vc != nil {
-		audio.PlayNextTrack(s, i.GuildID, vc.ChannelID)
 	}
 
 	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{

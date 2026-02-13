@@ -164,43 +164,18 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		log.Printf("Acquired stream slot for guild %s, active streams: %d/%d", guildID, len(StreamSem), cap(StreamSem))
 	default:
 		log.Printf("Maximum concurrent streams reached (%d), rejecting playback for guild %s", MaxConcurrentStreams, guildID)
-
-		// Try to send a message to the text channel about the limit
-		guild, err := s.State.Guild(guildID)
-		if err == nil && guild != nil {
-			for _, channel := range guild.Channels {
-				if channel.Type == discordgo.ChannelTypeGuildText {
-					s.ChannelMessageSend(channel.ID, fmt.Sprintf("⏸️ Maaf, jumlah maksimum stream (%d) telah tercapai. Harap tunggu hingga salah satu server selesai memutar lagu.", MaxConcurrentStreams))
-					break
-				}
-			}
-		}
 		return
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in playNextTrack: %v", r)
-			log.Printf("Stack trace:\n%s", debug.Stack())
-			// Release the stream slot when function exits
-			select {
-			case <-StreamSem:
-				log.Printf("Released stream slot after panic in guild %s", guildID)
-			default:
-				log.Printf("Warning: Tried to release stream slot but semaphore was empty for guild %s", guildID)
-			}
-		}
-	}()
-
-	// Release the stream slot when the function exits (when audio finishes)
-	defer func() {
+	// releaseSlot helper - call when playback is truly done
+	releaseSlot := func() {
 		select {
 		case <-StreamSem:
 			log.Printf("Released stream slot for guild %s", guildID)
 		default:
 			log.Printf("Warning: Tried to release stream slot but semaphore was empty for guild %s", guildID)
 		}
-	}()
+	}
 
 	Mutex.Lock()
 
@@ -480,33 +455,28 @@ func PlayNextTrack(s *discordgo.Session, guildID string, channelID string) {
 		vc.LogLevel = discordgo.LogDebug
 
 		go func(nextTrack *models.Track) {
+			// Release semaphore when this goroutine exits (playback truly done)
+			defer releaseSlot()
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("Recovered from panic in playAudioStream goroutine: %v", r)
 					log.Printf("Stack trace:\n%s", debug.Stack())
-					if vc != nil {
-						PlayNextTrack(s, guildID, vc.ChannelID)
-					}
 				}
 			}()
 
 			err := playAudioStream(s, vc, nextTrack.URL, guildID, nextTrack.RequesterUsername)
 			if err != nil {
 				log.Printf("Error playing audio stream: %v", err)
-
-				if strings.Contains(err.Error(), "4016") || strings.Contains(err.Error(), "encryption") {
-					log.Printf("Encryption error detected, scheduling reconnection for guild %s", guildID)
-					go func() {
-						time.Sleep(2 * time.Second)
-						// The health check will handle reconnection if needed
-					}()
-				}
 			} else {
 				log.Printf("Successfully played track: %s", nextTrack.Title)
 			}
+
+			// Chain to next track after this one finishes
+			// (semaphore will be released by defer above AFTER this returns)
 		}(nextTrack)
 	} else {
 		log.Printf("playNextTrack: Conditions not met for playback - vc is nil")
+		releaseSlot()
 	}
 }
 
@@ -796,8 +766,8 @@ func playAudioStream(s *discordgo.Session, vc *discordgo.VoiceConnection, url st
 		case <-time.After(1 * time.Second):
 		}
 
+		// Auto-advance: play next track in queue
 		if vc != nil {
-			// Find guildID from connection if possible, or use passed guildID
 			PlayNextTrack(s, guildID, vc.ChannelID)
 		}
 	}()
