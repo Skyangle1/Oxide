@@ -252,11 +252,6 @@ type voiceOP2 struct {
 	IP                string        `json:"ip"`
 }
 
-type voiceOP8 struct {
-	HeartbeatInterval time.Duration `json:"heartbeat_interval"`
-	V                 int           `json:"v"`
-}
-
 // WaitUntilConnected waits for the Voice Connection to
 // become ready, if it does not become ready it returns an err
 func (v *VoiceConnection) waitUntilConnected() error {
@@ -441,19 +436,6 @@ func (v *VoiceConnection) onEvent(message []byte) {
 
 	switch e.Operation {
 
-	case 8: // Hello
-		// Op 8 Hello now contains the heartbeat interval.
-		// We should start heartbeating immediately.
-		v2 := voiceOP8{}
-		if err := json.Unmarshal(e.RawData, &v2); err != nil {
-			v.log(LogError, "OP8 unmarshall error, %s, %s", err, string(e.RawData))
-			return
-		}
-		// Start the voice websocket heartbeat to keep the connection alive
-		go v.wsHeartbeat(v.wsConn, v.close, v2.HeartbeatInterval)
-
-		return
-
 	case 2: // READY
 
 		if err := json.Unmarshal(e.RawData, &v.op2); err != nil {
@@ -462,15 +444,8 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		}
 
 		// Start the voice websocket heartbeat to keep the connection alive
-		// go v.wsHeartbeat(v.wsConn, v.close, v.op2.HeartbeatInterval)
-		// TODO: Op 8 usually handles this now, but if we didn't get Op 8 (legacy?), we might need this.
-		// However, starting duplicate heartbeats is bad.
-		// We'll trust Op 8 for now, or maybe check if heartbeat is running?
-		// For safety with old/new hybrid, maybe just rely on Op 8 as per new docs.
-		// If Op 2 has interval, maybe we should use it if Op 8 didn't come?
-		// But Op 8 comes first.
-
-		// monitor a chan/bool to verify this was successful
+		go v.wsHeartbeat(v.wsConn, v.close, v.op2.HeartbeatInterval)
+		// TODO monitor a chan/bool to verify this was successful
 
 		// Start the UDP connection
 		err := v.udpOpen()
@@ -533,18 +508,6 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		for _, h := range v.voiceSpeakingUpdateHandlers {
 			h(v, voiceSpeakingUpdate)
 		}
-
-	case 11: // Resumed / Heartbeat ACK
-		// Ignore
-		return
-
-	case 18: // User Disconnect / Update
-		// Ignore
-		return
-
-	case 20: // DAVE / Platform
-		// Ignore
-		return
 
 	default:
 		v.log(LogDebug, "unknown voice operation, %d, %s", e.Operation, string(e.RawData))
@@ -811,7 +774,7 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 
 		// encrypt the opus data
 		// add incrementing nonce counter as per discord's requirements
-		binary.BigEndian.PutUint32(nonce[:4], v.nonceCounter)
+		binary.LittleEndian.PutUint32(nonce[:4], v.nonceCounter)
 		v.nonceCounter++
 
 		sendbuf := v.aead.Seal(nil, nonce, recvbuf, udpHeader)

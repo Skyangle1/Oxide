@@ -1,0 +1,70 @@
+server: # REST and WS server
+  port: 2333
+  address: 0.0.0.0
+  http2:
+    enabled: false # Whether to enable HTTP/2 support
+plugins: {}
+lavalink:
+  plugins: []
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: true
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters: # All filters are enabled by default
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 400 # The duration of the audio buffer. Higher values allow longer network delays but increase latency.
+    frameBufferDurationMs: 5000 # How many milliseconds of audio to keep buffered
+    opusEncodingQuality: 10 # Opus encoder quality. Valid values: 0-10
+    resamplingQuality: LOW # Quality of resampling operations. Valid values: LOW, MEDIUM, HIGH, HIGHEST
+    trackStuckThresholdMs: 10000 # The threshold for how long a track can be stuck before the TrackStuckEvent is fired
+    useSeekGhosting: true # Seek ghosting allows for smoother seeking by sending a few frames of silence before the seek
+    youtubePlaylistLoadLimit: 6 # Number of pages to load for YouTube playlists. 0 for no limit
+    playerUpdateInterval: 5 # How frequently to send player updates to clients, in seconds
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    gc-warnings: true
+    #ratelimit:
+      #ipBlocks: ["1.0.0.0/8", "..."] # list of ip blocks
+      #excludedIps: ["...", "..."] # ips which should be explicit excluded from usage by lavalink
+      #strategy: "RotateOnBan" # RotateOnBan | LoadBalance | NanoSwitch | RotatingNanoSwitch
+      #searchTriggersFail: true # Whether a search 429 should trigger marking the ip as failing
+      #retryLimit: -1 # -1 = use default lavalink retry limits
+      #youtubeConfig: # Required for avoiding YouTube rate limits
+        #email: "" # Email of Google account
+        #password: "" # Password of Google account
+    #youtube:
+      #enabled: true
+      #allowSearch: true
+      #allowDirectVideoIds: true
+      #allowDirectPlaylistIds: true
+      #clients:
+      #  - MUSIC
+      #  - ANDROID_VR
+      #  - WEB
+      #  - WEBEMBEDDED
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+logging:
+  file:
+    path: ./logs/
+  level:
+    root: INFO
+    lavalink: INFO

@@ -9,9 +9,11 @@ import (
 )
 
 type Config struct {
-	DiscordToken   string
-	ApplicationID  string
-	AllowedUserIDs map[string]bool
+	DiscordToken     string
+	ApplicationID    string
+	AllowedUserIDs   map[string]bool
+	LavalinkAddress  string
+	LavalinkPassword string
 }
 
 func LoadConfig() *Config {
@@ -49,9 +51,22 @@ func LoadConfig() *Config {
 		}
 	}
 
+	// Lavalink Config
+	lavalinkAddress := os.Getenv("LAVALINK_ADDRESS")
+	if lavalinkAddress == "" {
+		lavalinkAddress = "localhost:2333"
+	}
+
+	lavalinkPassword := os.Getenv("LAVALINK_PASSWORD")
+	if lavalinkPassword == "" {
+		lavalinkPassword = "youshallnotpass"
+	}
+
 	return &Config{
-		DiscordToken:   token,
-		ApplicationID:  appID,
-		AllowedUserIDs: allowedUsers,
+		DiscordToken:     token,
+		ApplicationID:    appID,
+		AllowedUserIDs:   allowedUsers,
+		LavalinkAddress:  lavalinkAddress,
+		LavalinkPassword: lavalinkPassword,
 	}
 }

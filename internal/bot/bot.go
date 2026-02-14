@@ -10,15 +10,16 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
-	"kingmyralune/oxide-music-bot/internal/audio"
 	"kingmyralune/oxide-music-bot/internal/config"
+	"kingmyralune/oxide-music-bot/internal/lavalink"
 	"kingmyralune/oxide-music-bot/internal/models"
 	"kingmyralune/oxide-music-bot/internal/utils"
 )
 
 type Bot struct {
-	Session *discordgo.Session
-	Config  *config.Config
+	Session  *discordgo.Session
+	Config   *config.Config
+	Lavalink *lavalink.Client
 }
 
 // Global variables for the leveling system (moved from main)
@@ -30,6 +31,12 @@ var (
 	RateLimiterInstance = &RateLimiter{
 		requests: make(map[string][]time.Time),
 	}
+
+	// Audio State (Moved from audio package)
+	GuildContexts  = make(map[string]*models.GuildContext)
+	AudioMutex     sync.RWMutex
+	RoomGuardMode  = make(map[string]bool)
+	GuardModeMutex sync.RWMutex
 )
 
 // RateLimiter tracks user requests to prevent abuse
@@ -78,8 +85,9 @@ func NewBot(cfg *config.Config) (*Bot, error) {
 	}
 
 	return &Bot{
-		Session: session,
-		Config:  cfg,
+		Session:  session,
+		Config:   cfg,
+		Lavalink: lavalink.NewClient(session, cfg),
 	}, nil
 }
 
@@ -93,6 +101,12 @@ func (b *Bot) Start() error {
 	err := b.Session.Open()
 	if err != nil {
 		return err
+	}
+
+	// Initialize Lavalink
+	b.Lavalink.RegisterHandlers()
+	if err := b.Lavalink.Connect(context.TODO()); err != nil {
+		log.Printf("Failed to connect to Lavalink: %v", err)
 	}
 
 	log.Println("Queen's Lɣre୨ৎ⭑ is now running. Press CTRL+C to exit.")
@@ -219,159 +233,62 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				return
 			}
 
-			query := strings.Join(parts[2:], " ")
-
 			// Get Voice State
-			voiceState, err := audio.GetVoiceState(s, m.Author.ID, m.GuildID)
+			voiceState, err := b.getVoiceState(m.Author.ID, m.GuildID)
 			if err != nil {
 				s.ChannelMessageSend(m.ChannelID, "You must be connected to a voice channel.")
 				return
 			}
 
-			// Get info
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
+			query := strings.Join(parts[2:], " ")
+
+			// Detect if URL
+			if !strings.HasPrefix(query, "http") {
+				query = "ytsearch:" + query
+			}
 
 			s.ChannelMessageSend(m.ChannelID, "🔍 Searching...")
 
-			track, err := audio.GetTrackInfoWithContext(ctx, query)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error finding track: %v", err))
+			// Lavalink Play
+			if err := b.Lavalink.PlayTrack(context.TODO(), m.GuildID, voiceState.ChannelID, query); err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error playing track: %v", err))
 				return
 			}
 
-			track.RequesterID = m.Author.ID
-			track.RequesterUsername = m.Author.Username
-
-			// Add to queue
-			audio.Mutex.Lock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
-			if !exists {
-				guildCtx = &models.GuildContext{
-					MusicQueue: &models.MusicQueue{},
-				}
-				audio.GuildContexts[m.GuildID] = guildCtx
-			}
-			if guildCtx.MusicQueue == nil {
-				guildCtx.MusicQueue = &models.MusicQueue{}
-			}
-
-			guildCtx.MusicQueue.Tracks = append(guildCtx.MusicQueue.Tracks, track)
-			audio.Mutex.Unlock()
-
-			// Check if playing
-			shouldPlay := false
-			audio.Mutex.RLock()
-			if guildCtx.CurrentTrack == nil && (guildCtx.MusicQueue == nil || len(guildCtx.MusicQueue.Tracks) <= 1) {
-				shouldPlay = true
-			}
-			audio.Mutex.RUnlock()
-
-			if shouldPlay {
-				audio.PlayNextTrack(s, m.GuildID, voiceState.ChannelID)
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Now playing: `%s`", track.Title))
-			} else {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added `%s` to queue.", track.Title))
-			}
 		} else if strings.HasPrefix(lowerContent, "lyre skip") {
-			// Basic skip implementation for text command
-			audio.Mutex.Lock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
-			if exists && guildCtx != nil {
-				guildCtx.CurrentTrack = nil
+			if err := b.Lavalink.Stop(context.TODO(), m.GuildID); err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error skipping track: %v", err))
+			} else {
+				s.ChannelMessageSend(m.ChannelID, "Skipped current track.")
 			}
-			audio.Mutex.Unlock()
 
-			vc, err := audio.GetConnectedVoiceConnection(s, m.GuildID)
-			if err == nil && vc != nil && vc.OpusSend != nil {
-				close(vc.OpusSend)
-				vc.OpusSend = nil
-			}
-			// Note: PlayNextTrack is called automatically by playAudioStream's defer
-			s.ChannelMessageSend(m.ChannelID, "Skipped current track.")
 		} else if strings.HasPrefix(lowerContent, "lyre stop") {
-			audio.Mutex.Lock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
-			if exists && guildCtx != nil {
-				guildCtx.MusicQueue.Tracks = nil
-				guildCtx.CurrentTrack = nil
-			}
-			audio.Mutex.Unlock()
-
-			vc, err := audio.GetConnectedVoiceConnection(s, m.GuildID)
-			if err == nil && vc != nil {
-				if vc.OpusSend != nil {
-					close(vc.OpusSend)
-					vc.OpusSend = nil
-				}
-				vc.Disconnect()
-			}
-			s.ChannelMessageSend(m.ChannelID, "Stopped playback and cleared queue.")
-		} else if strings.HasPrefix(lowerContent, "lyre queue") {
-			audio.Mutex.RLock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
-			queueExists := exists && guildCtx.MusicQueue != nil && len(guildCtx.MusicQueue.Tracks) > 0
-			tracks := []*models.Track{}
-			if queueExists {
-				tracks = guildCtx.MusicQueue.Tracks[:]
-			}
-			audio.Mutex.RUnlock()
-
-			if len(tracks) == 0 {
-				s.ChannelMessageSend(m.ChannelID, "Queue is empty.")
-				return
+			if err := b.Lavalink.Stop(context.TODO(), m.GuildID); err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Error stopping playback: %v", err))
+			} else {
+				s.ChannelMessageSend(m.ChannelID, "Stopped playback and cleared queue.")
 			}
 
-			var msg strings.Builder
-			msg.WriteString("**Music Queue:**\n")
-			for idx, track := range tracks {
-				msg.WriteString(fmt.Sprintf("%d. %s\n", idx+1, track.Title))
-			}
-			s.ChannelMessageSend(m.ChannelID, msg.String())
+			// Queue command implementation
+			// TODO: Implement Queue display with Lavalink
+			s.ChannelMessageSend(m.ChannelID, "Queue display implementation pending with Lavalink upgrade.")
 
 		} else if strings.HasPrefix(lowerContent, "lyre nowplaying") || strings.HasPrefix(lowerContent, "lyre np") {
-			audio.Mutex.RLock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
-			var track *models.Track
-			if exists && guildCtx != nil {
-				track = guildCtx.CurrentTrack
-			}
-			audio.Mutex.RUnlock()
-
-			if track == nil {
-				s.ChannelMessageSend(m.ChannelID, "Nothing is playing.")
-				return
-			}
-
-			embed := &discordgo.MessageEmbed{
-				Title:       "Now Playing",
-				Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
-				Color:       0xFF69B4,
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:   "Duration",
-						Value:  track.Duration,
-						Inline: true,
-					},
-					{
-						Name:   "Requested by",
-						Value:  track.RequesterUsername,
-						Inline: true,
-					},
-				},
-			}
-			if track.Thumbnail != "" {
-				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: track.Thumbnail}
-			}
-			s.ChannelMessageSendEmbed(m.ChannelID, embed)
+			// TODO: Implement Now Playing with Lavalink
+			s.ChannelMessageSend(m.ChannelID, "Now Playing display pending with Lavalink upgrade.")
 
 		} else if strings.HasPrefix(lowerContent, "lyre hug") {
 			// Parse mentioned user
+			target := m.Author
+			if len(m.Mentions) > 0 {
+				target = m.Mentions[0]
+			}
+
 			if len(m.Mentions) == 0 {
 				s.ChannelMessageSend(m.ChannelID, "Siapa yang mau dipeluk? Mention orangnya dong! 🤗\nContoh: `lyre hug @sayang`")
 				return
 			}
-			target := m.Mentions[0]
+
 			gifURL := utils.GetHugGifURL()
 
 			embed := &discordgo.MessageEmbed{
@@ -400,17 +317,17 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 
 		} else if strings.HasPrefix(lowerContent, "lyre autoplay") {
-			audio.Mutex.Lock()
-			guildCtx, exists := audio.GuildContexts[m.GuildID]
+			AudioMutex.Lock()
+			guildCtx, exists := GuildContexts[m.GuildID]
 			if !exists {
 				guildCtx = &models.GuildContext{
 					MusicQueue: &models.MusicQueue{},
 				}
-				audio.GuildContexts[m.GuildID] = guildCtx
+				GuildContexts[m.GuildID] = guildCtx
 			}
 			guildCtx.AutoPlay = !guildCtx.AutoPlay
 			autoPlayOn := guildCtx.AutoPlay
-			audio.Mutex.Unlock()
+			AudioMutex.Unlock()
 
 			status := "OFF"
 			if autoPlayOn {
@@ -419,11 +336,11 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔄 **AutoPlay**: %s\nBot akan otomatis cari lagu mirip saat antrian habis.", status))
 
 		} else if strings.HasPrefix(lowerContent, "lyre stay") {
-			audio.GuardModeMutex.Lock()
-			currentMode := audio.RoomGuardMode[m.GuildID]
+			GuardModeMutex.Lock()
+			currentMode := RoomGuardMode[m.GuildID]
 			newMode := !currentMode
-			audio.RoomGuardMode[m.GuildID] = newMode
-			audio.GuardModeMutex.Unlock()
+			RoomGuardMode[m.GuildID] = newMode
+			GuardModeMutex.Unlock()
 
 			status := "OFF"
 			if newMode {
@@ -515,14 +432,14 @@ func (b *Bot) handlePauseResume(s *discordgo.Session, i *discordgo.InteractionCr
 	})
 
 	// Toggle pause state
-	audio.Mutex.Lock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
+	AudioMutex.Lock()
+	guildCtx, exists := GuildContexts[i.GuildID]
 	isPaused := false
 	if exists && guildCtx != nil {
 		guildCtx.IsPaused = !guildCtx.IsPaused
 		isPaused = guildCtx.IsPaused
 	}
-	audio.Mutex.Unlock()
+	AudioMutex.Unlock()
 
 	status := "Resumed"
 	if isPaused {
@@ -540,19 +457,12 @@ func (b *Bot) handleSkipCommand(s *discordgo.Session, i *discordgo.InteractionCr
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	audio.Mutex.Lock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
+	AudioMutex.Lock()
+	guildCtx, exists := GuildContexts[i.GuildID]
 	if exists && guildCtx != nil {
 		guildCtx.CurrentTrack = nil
 	}
-	audio.Mutex.Unlock()
-
-	vc, err := audio.GetConnectedVoiceConnection(s, i.GuildID)
-	if err == nil && vc != nil && vc.OpusSend != nil {
-		// Stop current stream — playAudioStream defer will auto-advance
-		close(vc.OpusSend)
-		vc.OpusSend = nil
-	}
+	AudioMutex.Unlock()
 
 	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: "Skipped current track.",
@@ -564,22 +474,13 @@ func (b *Bot) handleStopCommand(s *discordgo.Session, i *discordgo.InteractionCr
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	audio.Mutex.Lock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
+	AudioMutex.Lock()
+	guildCtx, exists := GuildContexts[i.GuildID]
 	if exists && guildCtx != nil {
 		guildCtx.MusicQueue.Tracks = nil
 		guildCtx.CurrentTrack = nil
 	}
-	audio.Mutex.Unlock()
-
-	vc, err := audio.GetConnectedVoiceConnection(s, i.GuildID)
-	if err == nil && vc != nil {
-		if vc.OpusSend != nil {
-			close(vc.OpusSend)
-			vc.OpusSend = nil
-		}
-		vc.Disconnect()
-	}
+	AudioMutex.Unlock()
 
 	s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
 		Content: "Stopped playback and cleared queue.",
@@ -591,14 +492,13 @@ func (b *Bot) handleQueueCommand(s *discordgo.Session, i *discordgo.InteractionC
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	audio.Mutex.RLock()
-	guildCtx, exists := audio.GuildContexts[i.GuildID]
-	queueExists := exists && guildCtx.MusicQueue != nil && len(guildCtx.MusicQueue.Tracks) > 0
+	// Use Lavalink Queue
+	queue := b.Lavalink.GetQueue(i.GuildID)
+
 	tracks := []*models.Track{}
-	if queueExists {
-		tracks = guildCtx.MusicQueue.Tracks[:]
+	if queue != nil && len(queue.Tracks) > 0 {
+		tracks = queue.Tracks
 	}
-	audio.Mutex.RUnlock()
 
 	if len(tracks) == 0 {
 		s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
@@ -636,10 +536,10 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpda
 	}
 
 	// Check if the bot is in the same channel
-	audio.Mutex.RLock()
-	guildCtx, exists := audio.GuildContexts[v.GuildID]
+	AudioMutex.RLock()
+	guildCtx, exists := GuildContexts[v.GuildID]
 	botInChannel := exists && guildCtx != nil && guildCtx.VoiceConnection != nil && guildCtx.VoiceConnection.ChannelID == v.ChannelID
-	audio.Mutex.RUnlock()
+	AudioMutex.RUnlock()
 
 	if !botInChannel {
 		return
@@ -667,11 +567,11 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpda
 
 	// Send to the last known text channel, or find one
 	channelID := ""
-	audio.Mutex.RLock()
+	AudioMutex.RLock()
 	if guildCtx != nil && guildCtx.LastChannelID != "" {
 		channelID = guildCtx.LastChannelID
 	}
-	audio.Mutex.RUnlock()
+	AudioMutex.RUnlock()
 
 	if channelID == "" {
 		for _, ch := range guild.Channels {
@@ -685,4 +585,19 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpda
 	if channelID != "" {
 		s.ChannelMessageSend(channelID, greeting)
 	}
+}
+
+// Helper to get voice state
+func (b *Bot) getVoiceState(userID, guildID string) (*discordgo.VoiceState, error) {
+	guild, err := b.Session.State.Guild(guildID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, vs := range guild.VoiceStates {
+		if vs.UserID == userID {
+			return vs, nil
+		}
+	}
+	return nil, fmt.Errorf("user not in voice channel")
 }
