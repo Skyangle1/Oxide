@@ -8,7 +8,9 @@ oxide-music-bot
 *.dylib
 
 # Environment specific files
+# Environment specific files
 .env
+application.yml
 
 # IDE files
 .vscode/
